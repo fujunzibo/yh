@@ -1,0 +1,457 @@
+/**
+ * 折淘客 API 客户端
+ * 文档参考：https://www.zhetaoke.com/one/api3.aspx
+ * 请根据折淘客开放平台实际接口名称调整 apiSearch 中的路径与参数
+ */
+
+const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+
+// 折淘客多端口：20000 全网/超高佣；10001 开放平台（京东/美团/唯品会/考拉/饿了么/拼多多/抖音等）
+const BASE_20000 = 'http://api.zhetaoke.com:20000';
+const BASE_LINGQUAN = 'https://www.zhetaoke.com';
+const BASE_API_10001 = 'https://api.zhetaoke.com:10001';
+const BASE_API_10003 = 'https://api.zhetaoke.com:10003';
+const DEFAULT_PAGE_SIZE = 20;
+
+/**
+ * 折淘客接口注册表：几十个 API 按「名称 -> path + base」登记，统一用 callApi(name, params) 调用
+ * 文档：http://www.zhetaoke.com/one/api3.aspx 与 20000 端口说明
+ */
+const ZHETAOKE_APIS = {
+  // ----- 端口 20000 全网 -----
+  api_all: { path: '/api/api_all.ashx', base: BASE_20000, desc: '超高佣金商品列表' },
+  api_detail: { path: '/api/api_detail.ashx', base: BASE_20000, desc: '全网商品详情(含券)' },
+
+  // ----- 端口 10001 京东 -----
+  jd_promotion_new: { path: '/api/open_jing_union_open_promotion_byunionid_get.ashx', base: BASE_API_10001, desc: '京东转链-新' },
+  jd_zhuanlian: { path: '/api/open_jing_zhuanlian.ashx', base: BASE_API_10001, desc: '京东转链' },
+  jd_goods_detail: { path: '/api/open_jing_goods_detail_get.ashx', base: BASE_API_10001, desc: '京东商品详情-简' },
+  jd_goods_query: { path: '/api/open_jing_union_open_goods_query.ashx', base: BASE_API_10001, desc: '京东商品详情-详' },
+  jd_jingfen: { path: '/api/open_jing_union_open_goods_jingfen_query.ashx', base: BASE_API_10001, desc: '京粉精选' },
+  jd_goods_list: { path: '/api/open_jing_goods_list.ashx', base: BASE_API_10001, desc: '京东朋友圈火爆' },
+  jd_order_row: { path: '/api/open_jing_union_openz_order_row_query.ashx', base: BASE_API_10001, desc: '京东订单查询' },
+  jd_lijin_list: { path: '/api/open_jing_goods_lijin_list.ashx', base: BASE_API_10001, desc: '京享礼金商品' },
+  jd_bigfield: { path: '/api/open_jd_union_open_goods_bigfield_query.ashx', base: BASE_API_10001, desc: '京东商品详情图' },
+
+  // ----- 端口 10001 美团 -----
+  meituan_generate: { path: '/api/open_meituan_generateLink.ashx', base: BASE_API_10001, desc: '美团转链' },
+  meituan_order: { path: '/api/open_meituan_orderList2.ashx', base: BASE_API_10001, desc: '美团订单查询' },
+
+  // ----- 端口 10001 唯品会 -----
+  vip_gen: { path: '/api/open_vip_genByVIPUrlWithOauth.ashx', base: BASE_API_10001, desc: '唯品会转链' },
+  vip_shouquan: { path: '/api/vip_shouquan.ashx', base: BASE_API_10001, desc: '唯品会账号授权' },
+  vip_shouquaninfo: { path: '/api/vip_shouquaninfo.ashx', base: BASE_API_10001, desc: '唯品会授权列表' },
+  vip_order: { path: '/api/open_vip_orderListWithOauth.ashx', base: BASE_API_10001, desc: '唯品会订单' },
+  vip_goods: { path: '/api/open_vip_getByGoodsIdsWithOauth.ashx', base: BASE_API_10001, desc: '唯品会商品详情' },
+  vip_goods_v2: { path: '/api/open_vip_getByGoodsIdsV2WithOauth.ashx', base: BASE_API_10001, desc: '唯品会商品详情V2' },
+  vip_xianbao: { path: '/api/api_xianbao.ashx', base: BASE_API_10001, desc: '唯品会线报' },
+  vip_wenan: { path: '/api/open_vip_wenan_list.ashx', base: BASE_API_10001, desc: '唯品会精编文案' },
+  vip_query: { path: '/api/open_vip_queryWithOauth.ashx', base: BASE_API_10001, desc: '唯品会关键词查询' },
+
+  // ----- 端口 10001 考拉 -----
+  kaola_zhuanlian: { path: '/api/open_kaola_zhuanke_api_zhuanlian.ashx', base: BASE_API_10001, desc: '考拉转链' },
+  kaola_selected: { path: '/api/open_kaola_zhuanke_api_querySelectedGoods.ashx', base: BASE_API_10001, desc: '考拉精选' },
+  kaola_search: { path: '/api/open_kaola_zhuanke_api_searchGoods.ashx', base: BASE_API_10001, desc: '考拉关键词' },
+  kaola_goods_info: { path: '/api/open_kaola_zhuanke_api_queryGoodsInfo.ashx', base: BASE_API_10001, desc: '考拉商品详情' },
+  lianmeng_order: { path: '/api/open_lianmeng_orderList.ashx', base: BASE_API_10001, desc: '折淘客联盟订单(考拉/美团/饿了么/抖音等)' },
+
+  // ----- 端口 10001 饿了么 -----
+  eleme_generate: { path: '/api/open_eleme_generateLink.ashx', base: BASE_API_10001, desc: '饿了么转链' },
+
+  // ----- 端口 10001 拼多多 -----
+  pdd_zhuanlian: { path: '/api/open_pdd_zhuanlian_new.ashx', base: BASE_API_10001, desc: '拼多多转链' },
+  pdd_goods_detail: { path: '/api/open_pdd_goods_detail_get_new.ashx', base: BASE_API_10001, desc: '拼多多商品详情-简' },
+  pdd_goods_search: { path: '/api/open_pdd_goods_detail_search_new.ashx', base: BASE_API_10001, desc: '拼多多商品详情-详' },
+  pdd_shouquan: { path: '/api/open_pdd_shouquan_new.ashx', base: BASE_API_10001, desc: '拼多多授权备案' },
+  pdd_shouquan_query: { path: '/api/open_pdd_shouquan_query_new.ashx', base: BASE_API_10001, desc: '拼多多备案查询' },
+  pdd_order: { path: '/api/open_pdd_dingdan_new.ashx', base: BASE_API_10001, desc: '拼多多订单' },
+  pdd_cats: { path: '/api/open_pdd_goods_cats_new.ashx', base: BASE_API_10001, desc: '拼多多商品类目' },
+
+  // ----- 端口 10001 抖音 -----
+  douyin_zhuanlian: { path: '/api/open_douyin_zhuanlian.ashx', base: BASE_API_10001, desc: '抖音商品转链' },
+  douyin_product_detail: { path: '/api/open_douyin_product_detail.ashx', base: BASE_API_10001, desc: '抖音商品详情' },
+  douyin_product_search: { path: '/api/open_douyin_product_search.ashx', base: BASE_API_10001, desc: '抖音商品搜索' },
+  douyin_kouling: { path: '/api/open_douyin_kouling_jiexi.ashx', base: BASE_API_10001, desc: '抖音口令解析' },
+  douyin_order: { path: '/api/open_lianmeng_orderList.ashx', base: BASE_API_10001, desc: '抖音订单(同联盟订单)' },
+  douyin_live_zhuanlian: { path: '/api/open_douyin_zhuanlian_zhibojian.ashx', base: BASE_API_10001, desc: '抖音直播间转链' },
+  douyin_activity_zhuanlian: { path: '/api/open_douyin_zhuanlian_activity.ashx', base: BASE_API_10001, desc: '抖音活动转链' },
+  douyin_activity_list: { path: '/api/open_douyin_activity_list.ashx', base: BASE_API_10001, desc: '抖音活动列表' },
+  douyin_live_daren: { path: '/api/open_douyin_zhibojian_dare_list.ashx', base: BASE_API_10001, desc: '抖音直播间达人列表' },
+  douyin_live_products: { path: '/api/open_douyin_distributionLive_productlist.ashx', base: BASE_API_10001, desc: '抖音直播间商品列表' },
+};
+
+/**
+ * 按名称调用折淘客接口（所有在 ZHETAOKE_APIS 里登记的接口）
+ * 京东相关接口（jd_*）未传 unionId/jd_app_key/jd_app_secret 时，自动从环境变量注入
+ * @param apiName - ZHETAOKE_APIS 的 key，如 'api_detail'、'jd_promotion_new'
+ * @param params - 查询参数（一般需含 appkey，可来自 process.env.ZHETAOKE_APPKEY）
+ * @returns 接口返回的 JSON（或 __html）
+ */
+async function callApi(apiName, params = {}) {
+  const api = ZHETAOKE_APIS[apiName];
+  if (!api) throw new Error(`未知接口: ${apiName}，可选: ${Object.keys(ZHETAOKE_APIS).join(', ')}`);
+  const appkey = params.appkey ?? process.env.ZHETAOKE_APPKEY;
+  let merged = { ...params, ...(appkey ? { appkey } : {}) };
+  if (apiName.startsWith('jd_')) {
+    if (merged.unionId == null && process.env.ZHETAOKE_JD_UNION_ID) merged.unionId = process.env.ZHETAOKE_JD_UNION_ID;
+    if (merged.jd_app_key == null && process.env.ZHETAOKE_JD_APP_KEY) merged.jd_app_key = process.env.ZHETAOKE_JD_APP_KEY;
+    if (merged.jd_app_secret == null && process.env.ZHETAOKE_JD_APP_SECRET) merged.jd_app_secret = process.env.ZHETAOKE_JD_APP_SECRET;
+    if (merged.jd_lianmeng_id == null && process.env.ZHETAOKE_JD_UNION_ID) merged.jd_lianmeng_id = process.env.ZHETAOKE_JD_UNION_ID;
+    const jdPid = process.env.ZHETAOKE_JD_PID;
+    if (jdPid) {
+      if (merged.pid == null) merged.pid = jdPid;
+      if (merged.positionId == null) {
+        const parts = jdPid.split('_');
+        if (parts.length >= 3) merged.positionId = parts[2];
+      }
+    }
+  }
+  return request(api.path, merged, api.base);
+}
+
+/** api_detail：全网商品详情，单商品可能返回两条(S券/G券) */
+async function apiDetail(appkey, taoId) {
+  const raw = await callApi('api_detail', { appkey: appkey ?? process.env.ZHETAOKE_APPKEY, tao_id: taoId });
+  if (raw && raw.__html) return raw;
+  if (raw.status === 301) throw new Error('折淘客 api_detail 参数错误');
+  return raw;
+}
+
+/** api_all.ashx 分类 cid：1女装 2母婴 3美妆 4居家日用 5鞋品 6美食 7文娱车品 8数码家电 9男装 10内衣 11箱包 12配饰 13户外运动 14家装家纺 */
+const CID_MAP = {
+  女装: 1, 母婴: 2, 美妆: 3, 居家: 4, 日用: 4, 鞋品: 5, 美食: 6, 文娱: 7, 车品: 7,
+  数码: 8, 家电: 8, 手机: 8, 电脑: 8, 耳机: 8, 手表: 8, 男装: 9, 内衣: 10, 箱包: 11,
+  配饰: 12, 户外: 13, 运动: 13, 家装: 14, 家纺: 14,
+  洗发: 3, 护发: 3, 沐浴: 3, 护肤: 3, 洗护: 3,
+};
+
+/**
+ * 调用折淘客 API（GET），返回 JSON；若返回 HTML 则抛出可读错误
+ * @param path - 路径或完整 URL
+ * @param params - 查询参数（path 为完整 URL 时仍会追加，便于自定义 URL 只写基地址）
+ */
+async function request(path, params = {}, base = BASE_LINGQUAN) {
+  const isFullUrl = path.startsWith('http');
+  const url = new URL(isFullUrl ? path : `${base}${path}`);
+  Object.entries(params).forEach(([k, v]) => {
+    if (v != null && v !== '') url.searchParams.set(k, String(v));
+  });
+  const res = await fetch(url.toString(), { method: 'GET' });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Zhetaoke API error: ${res.status} ${text.slice(0, 300)}`);
+  const trimmed = text.trim();
+  if (trimmed.startsWith('<!') || trimmed.startsWith('<html')) {
+    return { __html: true, content: text };
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`折淘客返回格式异常，无法解析为 JSON。请检查接口地址与参数。`);
+  }
+}
+
+/**
+ * 按分类查询商品（折淘客文档：超级分类商品API）
+ * 参数：appkey（对接秘钥）, type（分类）, page
+ * 若设置环境变量 ZHETAOKE_LINGQUAN_URL，则只请求该地址（完整 URL 或 path，例如带 ? 的查询串可放在 path）
+ */
+async function apiCategorySearch(appkey, type = '0', page = 1) {
+  const customUrl = process.env.ZHETAOKE_LINGQUAN_URL;
+  if (customUrl && customUrl.trim()) {
+    const base = customUrl.trim().replace(/\s/g, '').replace(/\?.*$/, '');
+    const full = base.startsWith('http') ? base : BASE_LINGQUAN + (base.startsWith('/') ? '' : '/') + base;
+    return request(full, { appkey, type, page }, '');
+  }
+  const path = '/user/extend/extend_lingquan_type.aspx';
+  const params = { appkey, type, page };
+  let lastErr;
+  for (const base of [BASE_LINGQUAN, BASE_API_10001, BASE_API_10003]) {
+    try {
+      return await request(path, params, base);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
+/** 关键词 -> 分类 type（领券 extend 用，0 表示全部） */
+const KEYWORD_TO_TYPE = {
+  女装: '1', 男装: '2', 美妆: '3', 数码: '4', 家电: '4', 手机: '4', 电脑: '4', 耳机: '4', 手表: '4', 母婴: '5', 美食: '6',
+  内衣: '7', 箱包: '8', 配饰: '9', 户外: '10', 运动: '10', 家装: '11', 家纺: '11', 居家: '12', 日用: '12',
+};
+
+function getCategoryType(keyword) {
+  const k = (keyword || '').trim();
+  for (const [kw, type] of Object.entries(KEYWORD_TO_TYPE)) {
+    if (k.includes(kw)) return type;
+  }
+  return '0';
+}
+
+/** 关键词 -> api_all.ashx 的 cid（1-14），空表示全部 */
+function getCidForApiAll(keyword) {
+  const k = (keyword || '').trim();
+  for (const [kw, cid] of Object.entries(CID_MAP)) {
+    if (k.includes(kw)) return cid;
+  }
+  return ''; // 全部
+}
+
+/**
+ * 高佣转链（根据商品ID生成淘宝推广链接）- 折淘客文档路径
+ * 若设置环境变量 ZHETAOKE_TAOBAO_PID（如 mm_1653850119_2237850493_111209650326），将自动带入
+ */
+async function apiConvertToAffiliate(appkey, itemId, options = {}) {
+  const pid = options.pid ?? process.env.ZHETAOKE_TAOBAO_PID;
+  return request('/user/open/open_gaoyongzhuanlian.aspx', {
+    appkey,
+    item_id: itemId,
+    ...(pid ? { pid } : {}),
+  });
+}
+
+/**
+ * 从原始接口响应中解析商品列表（兼容多种结构）
+ */
+function parseItemList(raw) {
+  let list = [];
+  if (raw.tbk_dg_material_optional_response?.result_list?.map_data) {
+    list = raw.tbk_dg_material_optional_response.result_list.map_data;
+  } else if (raw.jd_union_open_goods_jingfen_query_response?.queryResult?.data?.jfGoodsResp) {
+    const jf = raw.jd_union_open_goods_jingfen_query_response.queryResult.data.jfGoodsResp;
+    list = Array.isArray(jf) ? jf : [jf];
+  } else if (raw.jd_union_open_goods_query_response?.queryResult?.data?.goodsResp) {
+    const gr = raw.jd_union_open_goods_query_response.queryResult.data.goodsResp;
+    list = Array.isArray(gr) ? gr : [gr];
+  } else if (Array.isArray(raw.result_list)) list = raw.result_list;
+  else if (Array.isArray(raw.data)) list = raw.data;
+  else if (Array.isArray(raw.results)) list = raw.results;
+  else if (raw.content?.list && Array.isArray(raw.content.list)) list = raw.content.list;
+  else if (Array.isArray(raw.content)) list = raw.content;
+  else if (Array.isArray(raw.items)) list = raw.items;
+  else if (raw.data?.list && Array.isArray(raw.data.list)) list = raw.data.list;
+  else if (Array.isArray(raw.list)) list = raw.list;
+  else if (raw.content && typeof raw.content === 'object' && Array.isArray(raw.content)) list = raw.content;
+  return list;
+}
+
+function normalizeItem(item) {
+  const id = item.tao_id ?? item.skuId ?? item.item_id ?? item.goods_id ?? item.num_iid ?? item.id;
+  const price = parseFloat(
+    item.quanhou_jiage ?? item.zk_final_price ?? item.price ?? item.size ?? item.coupon_price ?? item.final_price ?? item.quan_price
+    ?? item.priceInfo?.price ?? item.wlUnitPrice ?? 0
+  ) || 0;
+  const title = item.title ?? item.tao_title ?? item.skuName ?? item.goods_name ?? item.item_title ?? item.goods_title ?? '';
+  const pic = item.pict_url ?? item.goods_thumb_url ?? item.pic_url ?? item.image ?? item.goods_pic
+    ?? item.imageInfo?.whiteImage ?? item.imageInfo?.imageList?.urlInfo?.url ?? (Array.isArray(item.imageInfo?.imageList?.urlInfo) ? item.imageInfo.imageList.urlInfo[0]?.url : null) ?? '';
+  const link = item.item_url ?? item.url ?? item.coupon_click_url ?? item.click_url ?? item.link ?? item.goods_link
+    ?? (item.materialUrl ? (item.materialUrl.startsWith('http') ? item.materialUrl : 'https://' + item.materialUrl.replace(/^https?:\/\//, '')) : '') ?? '';
+  const coupon = item.coupon_info ?? item.coupon_amount ?? item.coupon ?? '';
+  return { itemId: id, title, price, pic, link, coupon, raw: item };
+}
+
+/**
+ * 超高佣金商品API（api_all.ashx）- 文档：http://api.zhetaoke.com:20000/api/api_all.ashx
+ * 返回商品列表 JSON；部分环境支持 q 关键词，无则忽略
+ */
+async function apiAll(appkey, { page = 1, page_size = 40, sort = 'price_asc', cid = '', commission_rate_start = '', q = '' }) {
+  const raw = await request('/api/api_all.ashx', {
+    appkey,
+    page,
+    page_size,
+    sort,
+    ...(cid ? { cid } : {}),
+    ...(commission_rate_start ? { commission_rate_start } : {}),
+    ...(q ? { q } : {}),
+  }, BASE_20000);
+  if (raw && raw.__html) return raw;
+  if (raw.status === 301) throw new Error('折淘客 api_all 参数错误或未授权');
+  return raw;
+}
+
+/**
+ * 关键词匹配：标题或简介包含「完整关键词」或「任一连词段」即保留
+ */
+function itemMatchesKeyword(item, lowerKw) {
+  if (!lowerKw || lowerKw === '商品') return true;
+  const title = (item.title ?? item.tao_title ?? item.goods_name ?? item.goods_title ?? '').toLowerCase();
+  const desc = (item.jianjie ?? item.goods_content ?? item.desc ?? '').toLowerCase();
+  const text = title + ' ' + desc;
+  if (text.includes(lowerKw)) return true;
+  for (let i = 0; i <= lowerKw.length - 2; i++) {
+    const seg = lowerKw.slice(i, i + 2);
+    if (text.includes(seg)) return true;
+  }
+  return false;
+}
+
+/** 手机配件相关词：搜 手机/智能手机 时排除标题或类目含以下词的商品 */
+const PHONE_ACCESSORY_WORDS = [
+  '配件', '手机壳', '保护壳', '手机套', '保护套', '贴膜', '钢化膜', '数据线', '充电器', '充电线',
+  '支架', '挂绳', '指环', '手机绳', '耳机', '耳塞', '保护膜', '背膜', '镜头膜', '车载支架',
+  '手机支架', '壳膜', '壳套', '充电宝', '移动电源',
+];
+
+function isPhoneAccessory(item) {
+  const title = (item.title ?? item.tao_title ?? item.goods_name ?? item.goods_title ?? '').toLowerCase();
+  const cat = (item.category_name ?? item.level_one_category_name ?? item.cid1Name ?? '').toLowerCase();
+  const text = title + ' ' + cat;
+  return PHONE_ACCESSORY_WORDS.some((w) => text.includes(w));
+}
+
+function isPhoneSearch(keyword) {
+  const k = (keyword || '').trim();
+  return /手机|智能机|电话|iphone|安卓机/i.test(k);
+}
+
+/**
+ * 聚合搜索：优先使用 20000 端口「超高佣金商品API」拉取列表（带关键词 q、多页），再按关键词与价格筛选
+ */
+async function searchProducts(appkey, { keyword, minPrice, maxPrice }) {
+  const cid = getCidForApiAll(keyword);
+  const lowerKw = (keyword || '').trim().toLowerCase();
+  const hasKeyword = lowerKw && lowerKw !== '商品';
+  const needMorePages = isPhoneSearch(keyword);
+  let list = [];
+
+  try {
+    const pagesToFetch = needMorePages ? 5 : hasKeyword ? 3 : 1;
+    for (let p = 1; p <= pagesToFetch; p++) {
+      const raw = await apiAll(appkey, {
+        page: p,
+        page_size: 50,
+        sort: 'price_asc',
+        cid: cid || undefined,
+        q: hasKeyword ? keyword : undefined,
+      });
+      if (raw && raw.__html) {
+        const err = new Error('折淘客返回了网页，已在展示区显示。');
+        err.htmlContent = raw.content;
+        throw err;
+      }
+      const chunk = parseItemList(raw);
+      if (!chunk.length) break;
+      list = list.concat(chunk);
+      if (chunk.length < 50) break;
+    }
+  } catch (e) {
+    if (e.htmlContent) throw e;
+    try {
+      const type = getCategoryType(keyword);
+      const fallbackPages = needMorePages ? 3 : 1;
+      for (let p = 1; p <= fallbackPages; p++) {
+        const raw = await apiCategorySearch(appkey, type, p);
+        if (raw && raw.__html) {
+          const err = new Error('折淘客返回了网页，已在展示区显示。');
+          err.htmlContent = raw.content;
+          throw err;
+        }
+        const chunk = parseItemList(raw);
+        if (!chunk.length) break;
+        list = list.concat(chunk);
+        if (chunk.length < DEFAULT_PAGE_SIZE) break;
+      }
+    } catch (e2) {
+      if (e2.htmlContent) throw e2;
+      throw e;
+    }
+  }
+
+  if (list.length === 0 && isPhoneSearch(keyword)) {
+    try {
+      const jdRaw = await callApi('jd_jingfen', { appkey, eliteId: '24', pageIndex: '1', pageSize: '50' });
+      if (!jdRaw?.__html) {
+        const code = jdRaw?.jd_union_open_goods_jingfen_query_response?.queryResult?.code;
+        if (code === '200' || code === 200) {
+          const jdList = parseItemList(jdRaw);
+          if (jdList.length) list = jdList;
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (hasKeyword) {
+    list = list.filter((item) => itemMatchesKeyword(item, lowerKw));
+  }
+  if (isPhoneSearch(keyword)) {
+    list = list.filter((item) => !isPhoneAccessory(item));
+  }
+
+  let items = list.map(normalizeItem);
+  if (minPrice != null && minPrice > 0) items = items.filter((i) => i.price >= minPrice);
+  if (maxPrice != null && maxPrice < 999999) items = items.filter((i) => i.price <= maxPrice);
+  items.sort((a, b) => a.price - b.price);
+  return items;
+}
+
+/** 判断是否为京东商品（链接或来源含 jd） */
+function isJdItem(item) {
+  const link = (item.link || item.raw?.item_url || item.raw?.url || '').toLowerCase();
+  const pic = (item.pic || item.raw?.pict_url || '').toLowerCase();
+  return link.includes('jd.com') || link.includes('360buyimg') || pic.includes('360buyimg');
+}
+
+/**
+ * 为单个商品生成推广链接（淘宝用 PID，京东用 unionId/positionId），失败则保留原 link
+ */
+async function getPromotionLink(appkey, item) {
+  try {
+    if (isJdItem(item)) {
+      const raw = await callApi('jd_promotion_new', {
+        materialId: item.itemId || item.link,
+        chainType: '2',
+      });
+      if (raw?.__html) return item.link;
+      const res = raw?.jd_union_open_promotion_byunionid_get_response?.result;
+      if (typeof res === 'string') {
+        const data = JSON.parse(res);
+        const url = data?.data?.shortURL || data?.data?.clickURL;
+        if (url) return url;
+      }
+      const content = raw?.content?.[0];
+      if (content?.shorturl) return content.shorturl;
+      if (content?.coupon_click_url) return content.coupon_click_url;
+    } else {
+      const raw = await apiConvertToAffiliate(appkey, item.itemId);
+      if (raw?.__html) return item.link;
+      const url = raw?.url ?? raw?.data?.url ?? raw?.coupon_click_url ?? raw?.click_url ?? raw?.short_url;
+      if (url) return url;
+    }
+  } catch (_) {}
+  return item.link;
+}
+
+const CONCURRENCY = 3;
+async function runWithLimit(tasks, fn) {
+  const results = [];
+  for (let i = 0; i < tasks.length; i += CONCURRENCY) {
+    const chunk = tasks.slice(i, i + CONCURRENCY);
+    results.push(...(await Promise.all(chunk.map(fn))));
+  }
+  return results;
+}
+
+/**
+ * 为商品列表逐条生成推广链接（淘宝 PID / 京东 PID），替换 item.link；控制并发避免限流
+ */
+async function ensurePromotionLinks(appkey, items) {
+  if (!items?.length) return items;
+  const appkeyVal = appkey ?? process.env.ZHETAOKE_APPKEY;
+  const links = await runWithLimit(items, (item) => getPromotionLink(appkeyVal, item));
+  return items.map((item, i) => ({ ...item, link: links[i] ?? item.link }));
+}
+
+export {
+  request,
+  ZHETAOKE_APIS,
+  callApi,
+  apiDetail,
+  apiCategorySearch,
+  apiAll,
+  apiConvertToAffiliate,
+  searchProducts,
+  ensurePromotionLinks,
+  getCategoryType,
+  getCidForApiAll,
+};
