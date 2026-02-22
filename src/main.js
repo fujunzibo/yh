@@ -40,21 +40,25 @@ function App() {
     if (mounted) updateDOM();
   }
 
-  async function doSearch() {
+  async function doSearch(page = 1) {
     const q = (query || '').trim();
     if (!q) return;
-    setState({ loading: true, result: null });
+    setState({ loading: true, result: page === 1 ? null : result });
     try {
       const res = await fetch(`${API_BASE}/api/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: q }),
+        body: JSON.stringify({ query: q, page, pageSize: 20 }),
       });
       const data = await res.json();
       const result = {
         error: data.error || null,
         parsed: data.parsed || null,
         items: data.items || [],
+        total: data.total ?? 0,
+        page: data.page ?? 1,
+        pageSize: data.pageSize ?? 20,
+        totalPages: data.totalPages ?? 0,
         fallbackLinks: data.fallbackLinks || [],
         zhetaokeSearchUrl: data.zhetaokeSearchUrl || null,
         htmlContent: data.htmlContent || null,
@@ -110,6 +114,7 @@ function App() {
                 createElement('h3', { className: 'item-title' }, [it.title || '商品']),
                 createElement('div', { className: 'item-meta' }, [
                   createElement('span', { className: 'item-price' }, [`¥ ${Number(it.price).toFixed(2)}`]),
+                  it.source ? createElement('span', { className: 'item-source' }, [`来自${it.source}`]) : null,
                   it.coupon ? createElement('span', { className: 'item-coupon' }, [it.coupon]) : null,
                 ]),
               ]),
@@ -119,6 +124,26 @@ function App() {
           list.appendChild(itemEl);
         });
         listEl.appendChild(list);
+        if (result.totalPages > 1) {
+          const pagination = createElement('div', { className: 'pagination' }, [
+            createElement('button', {
+              type: 'button',
+              className: 'pagination-btn',
+              disabled: result.page <= 1,
+              onclick: () => doSearch(result.page - 1),
+            }, ['上一页']),
+            createElement('span', { className: 'pagination-info' }, [
+              `第 ${result.page} / ${result.totalPages} 页，共 ${result.total} 条`,
+            ]),
+            createElement('button', {
+              type: 'button',
+              className: 'pagination-btn',
+              disabled: result.page >= result.totalPages,
+              onclick: () => doSearch(result.page + 1),
+            }, ['下一页']),
+          ]);
+          listEl.appendChild(pagination);
+        }
         if (result.fallbackLinks?.length) {
           const tip = createElement('p', { className: 'fallback-tip secondary' }, ['或前往：']);
           const linkRow = createElement('div', { className: 'fallback-links' });

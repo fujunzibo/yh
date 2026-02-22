@@ -224,6 +224,11 @@ body {
   color: var(--success);
 }
 
+.item-source {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
 .item-go {
   align-self: center;
   padding: 0.5rem 1rem;
@@ -286,6 +291,44 @@ body {
 .fallback-link:hover {
   background: var(--accent);
   color: var(--bg);
+}
+
+/* 分页 */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  padding: 0.75rem 0;
+  flex-wrap: wrap;
+}
+
+.pagination-btn {
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.pagination-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.pagination-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pagination-info {
+  font-size: 0.9rem;
+  color: var(--text-muted);
 }
 
 @media (max-width: 520px) {

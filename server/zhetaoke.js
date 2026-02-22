@@ -198,6 +198,20 @@ function getCidForApiAll(keyword) {
   return ''; // 全部
 }
 
+/** 从环境变量读取推广位参数，供折淘客/折京客搜索接口「直接返回带 PID 的链接」 */
+function getPromotionParams() {
+  const p = {};
+  if (process.env.ZHETAOKE_TAOBAO_PID) p.pid = process.env.ZHETAOKE_TAOBAO_PID;
+  if (process.env.ZHETAOKE_JD_UNION_ID) {
+    p.unionId = process.env.ZHETAOKE_JD_UNION_ID;
+    p.jd_lianmeng_id = process.env.ZHETAOKE_JD_UNION_ID;
+  }
+  if (process.env.ZHETAOKE_JD_PID) {
+    p.positionId = process.env.ZHETAOKE_JD_PID.split('_').pop() || process.env.ZHETAOKE_JD_PID;
+  }
+  return p;
+}
+
 /**
  * 高佣转链（根据商品ID生成淘宝推广链接）- 折淘客文档路径
  * 若设置环境变量 ZHETAOKE_TAOBAO_PID（如 mm_1653850119_2237850493_111209650326），将自动带入
@@ -248,7 +262,9 @@ function normalizeItem(item) {
   const link = item.item_url ?? item.url ?? item.coupon_click_url ?? item.click_url ?? item.link ?? item.goods_link
     ?? (item.materialUrl ? (item.materialUrl.startsWith('http') ? item.materialUrl : 'https://' + item.materialUrl.replace(/^https?:\/\//, '')) : '') ?? '';
   const coupon = item.coupon_info ?? item.coupon_amount ?? item.coupon ?? '';
-  return { itemId: id, title, price, pic, link, coupon, raw: item };
+  const linkPic = ((link || '') + ' ' + (item.pict_url ?? item.pic_url ?? item.image ?? '')).toLowerCase();
+  const source = linkPic.includes('jd.com') || linkPic.includes('360buyimg') ? '京东' : '淘宝';
+  return { itemId: id, title, price, pic, link, coupon, source, raw: item };
 }
 
 /**
@@ -270,14 +286,34 @@ async function apiAll(appkey, { page = 1, page_size = 40, sort = 'price_asc', ci
   return raw;
 }
 
+/** 从商品原始对象拼接所有可检索文本（标题、描述、类目、京东 skuName 等），避免关键词过滤误杀 */
+function getSearchableText(item) {
+  const parts = [
+    item.title,
+    item.tao_title,
+    item.skuName,
+    item.short_name,
+    item.goods_name,
+    item.goods_title,
+    item.item_title,
+    item.jianjie,
+    item.goods_content,
+    item.desc,
+    item.category_name,
+    item.level_one_category_name,
+    item.cid1Name,
+    item.cid2Name,
+    item.cid3Name,
+  ].filter(Boolean);
+  return parts.join(' ').toLowerCase();
+}
+
 /**
- * 关键词匹配：标题或简介包含「完整关键词」或「任一连词段」即保留
+ * 关键词匹配：标题/简介/类目/京东 skuName 等包含「完整关键词」或「任一连词段」即保留
  */
 function itemMatchesKeyword(item, lowerKw) {
   if (!lowerKw || lowerKw === '商品') return true;
-  const title = (item.title ?? item.tao_title ?? item.goods_name ?? item.goods_title ?? '').toLowerCase();
-  const desc = (item.jianjie ?? item.goods_content ?? item.desc ?? '').toLowerCase();
-  const text = title + ' ' + desc;
+  const text = getSearchableText(item);
   if (text.includes(lowerKw)) return true;
   for (let i = 0; i <= lowerKw.length - 2; i++) {
     const seg = lowerKw.slice(i, i + 2);
@@ -313,30 +349,63 @@ async function searchProducts(appkey, { keyword, minPrice, maxPrice }) {
   const lowerKw = (keyword || '').trim().toLowerCase();
   const hasKeyword = lowerKw && lowerKw !== '商品';
   const needMorePages = isPhoneSearch(keyword);
+  const debug = process.env.DEBUG_SEARCH === '1' || process.env.DEBUG_SEARCH === 'true';
   let list = [];
+
+  if (hasKeyword) {
+    const promotionParams = getPromotionParams();
+    for (const base of [BASE_LINGQUAN, BASE_20000]) {
+      for (let page = 1; page <= 2; page++) {
+        try {
+          const raw = await request('/api/search_result.ashx', {
+            appkey, q: keyword, page, page_size: 50, ...promotionParams,
+          }, base);
+          if (!raw?.__html && raw?.status !== 301) {
+            const chunk = parseItemList(raw);
+            if (chunk.length) list = list.concat(chunk);
+            if (chunk.length < 50) break;
+          } else break;
+        } catch (_) { break; }
+      }
+    }
+    if (debug) console.log('[search] after search_result: %d', list.length);
+  }
 
   try {
     const pagesToFetch = needMorePages ? 5 : hasKeyword ? 3 : 1;
     for (let p = 1; p <= pagesToFetch; p++) {
-      const raw = await apiAll(appkey, {
+      let raw = await apiAll(appkey, {
         page: p,
         page_size: 50,
         sort: 'price_asc',
         cid: cid || undefined,
         q: hasKeyword ? keyword : undefined,
       });
+      if (raw && raw.__html && p === 1 && hasKeyword) {
+        try {
+          const fallback = await request('/api/api_all.ashx', {
+            appkey, page: 1, page_size: 50, sort: 'price_asc',
+            ...(cid ? { cid } : {}), q: keyword, ...getPromotionParams(),
+          }, BASE_LINGQUAN);
+          if (!fallback?.__html && fallback?.status !== 301) raw = fallback;
+        } catch (_) {}
+      }
       if (raw && raw.__html) {
-        const err = new Error('折淘客返回了网页，已在展示区显示。');
-        err.htmlContent = raw.content;
-        throw err;
+        if (debug) console.log('[search] api_all 第%d页返回 HTML，已 break', p);
+        break;
       }
       const chunk = parseItemList(raw);
-      if (!chunk.length) break;
+      if (!chunk.length) {
+        if (debug) console.log('[search] api_all 第%d页 parseItemList 解析到 0 条', p);
+        break;
+      }
       list = list.concat(chunk);
       if (chunk.length < 50) break;
     }
+    if (debug) console.log('[search] after api_all: %d', list.length);
   } catch (e) {
     if (e.htmlContent) throw e;
+    if (debug) console.log('[search] api_all 异常:', e?.message?.slice(0, 60));
     try {
       const type = getCategoryType(keyword);
       const fallbackPages = needMorePages ? 3 : 1;
@@ -356,6 +425,7 @@ async function searchProducts(appkey, { keyword, minPrice, maxPrice }) {
       if (e2.htmlContent) throw e2;
       throw e;
     }
+    if (debug) console.log('[search] after 领券 fallback: %d', list.length);
   }
 
   if (list.length === 0 && isPhoneSearch(keyword)) {
@@ -369,18 +439,85 @@ async function searchProducts(appkey, { keyword, minPrice, maxPrice }) {
         }
       }
     } catch (_) {}
+    if (debug) console.log('[search] after jd_jingfen(if): %d', list.length);
+  }
+
+  if (hasKeyword && list.length === 0) {
+    try {
+      for (let jdPage = 1; jdPage <= 2; jdPage++) {
+        const jdListRaw = await callApi('jd_goods_list', {
+          appkey, keyword, pageIndex: String(jdPage), pageSize: '50', sort: 'price_asc',
+        });
+        if (!jdListRaw?.__html && (jdListRaw?.status === 200 || jdListRaw?.content?.length)) {
+          const jdList = parseItemList(jdListRaw);
+          if (jdList.length) list = list.concat(jdList);
+          if (!jdList?.length || jdList.length < 50) break;
+        } else break;
+      }
+    } catch (_) {}
+    if (debug) console.log('[search] after jd_goods_list: %d', list.length);
+  }
+
+  const dedupById = (arr) => {
+    const seen = new Set();
+    return arr.filter((item) => {
+      const id = item.tao_id ?? item.skuId ?? item.item_id ?? item.goods_id ?? item.num_iid ?? item.id;
+      if (id == null || id === '') return true;
+      const sid = String(id);
+      if (seen.has(sid)) return false;
+      seen.add(sid);
+      return true;
+    });
+  };
+  list = dedupById(list);
+  if (debug) console.log('[search] after dedup: %d', list.length);
+
+  const isRawJd = (r) => {
+    const link = (r.item_url ?? r.url ?? r.materialUrl ?? '').toLowerCase();
+    const pic = (r.pict_url ?? r.pic_url ?? r.image ?? '').toLowerCase();
+    return link.includes('jd.com') || pic.includes('360buyimg');
+  };
+  const taobaoCount = list.filter((r) => !isRawJd(r)).length;
+  if (list.length > 0 && taobaoCount === 0 && hasKeyword) {
+    try {
+      const taoRaw = await apiAll(appkey, {
+        page: 1, page_size: 50, sort: 'price_asc', q: keyword, cid: cid || undefined,
+      });
+      if (!taoRaw?.__html && taoRaw?.status !== 301) {
+        const chunk = parseItemList(taoRaw);
+        if (chunk.length) list = list.concat(chunk);
+      }
+    } catch (_) {}
+    try {
+      const type = getCategoryType(keyword);
+      for (let p = 1; p <= 2; p++) {
+        const raw = await apiCategorySearch(appkey, type, p);
+        if (!raw?.__html && raw?.status !== 301) {
+          const chunk = parseItemList(raw);
+          if (chunk.length) list = list.concat(chunk);
+          if (chunk.length < DEFAULT_PAGE_SIZE) break;
+        } else break;
+      }
+    } catch (_) {}
+    list = dedupById(list);
+    if (debug) console.log('[search] after 补淘宝: %d', list.length);
   }
 
   if (hasKeyword) {
+    const before = list.length;
     list = list.filter((item) => itemMatchesKeyword(item, lowerKw));
+    if (debug) console.log('[search] after keyword filter: %d (was %d)', list.length, before);
   }
   if (isPhoneSearch(keyword)) {
+    const before = list.length;
     list = list.filter((item) => !isPhoneAccessory(item));
+    if (debug) console.log('[search] after phone accessory filter: %d (was %d)', list.length, before);
   }
 
   let items = list.map(normalizeItem);
   if (minPrice != null && minPrice > 0) items = items.filter((i) => i.price >= minPrice);
   if (maxPrice != null && maxPrice < 999999) items = items.filter((i) => i.price <= maxPrice);
+  if (debug) console.log('[search] after price filter: %d', items.length);
   items.sort((a, b) => a.price - b.price);
   return items;
 }
