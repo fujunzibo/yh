@@ -76,3 +76,22 @@ DEBUG_SEARCH=1
 | 关键词字段不全 | 过滤后条数骤减 | 扩展 title、skuName、short_name 等 |
 
 按上述建议改完后，再配合 `DEBUG_SEARCH=1` 看各阶段条数，即可进一步精确定位。
+
+---
+
+## 五、为什么没有一条来自淘宝？
+
+**淘宝商品只来自**：search_result、api_all（20000 或领券站）、领券分类、以及「补淘宝」时再请求的 api_all/领券。
+
+**常见原因**：
+
+1. **20000 与领券站都返回登录页（HTML）**  
+   search_result、api_all 请求 20000 或领券站时，若未登录/未授权会返回 HTML，parseItemList 拿不到列表，list 里没有淘宝。只有京东接口（jd_goods_list、jd_jingfen）有数据时，结果就全是京东。
+
+2. **折淘客后台未开通或未授权**  
+   需在折淘客后台开通「全网超高佣（20000 端口）」和「领券站」，并完成对应授权；否则这些接口会返回 301 或登录页。
+
+3. **返回结构未被解析**  
+   若接口返回的列表在 `content.data`、`data.data`、`result.data` 等，parseItemList 已增加对应分支；若仍无淘宝，可设 `DEBUG_SEARCH=1` 看各阶段条数，或打 log 看 raw 的 keys 再补解析。
+
+**当前已做**：补淘宝时优先请求领券站（BASE_LINGQUAN）的 api_all；parseItemList 增加 content.data、data.data、result.data、model.list 等分支；若最终结果仍无淘宝，控制台会打印一次说明（可设 DEBUG_SEARCH=1 看各阶段条数）。

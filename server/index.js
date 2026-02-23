@@ -47,6 +47,8 @@ app.post('/api/search', async (req, res) => {
     { name: '拼多多搜索', url: `https://mobile.yangkeduo.com/search_result.html?search_key=${enc(keyword)}` },
   ];
   const zhetaokeSearchUrl = `https://www.zhetaoke.com/list/index.html?q=${enc(keyword)}`;
+  /** 搜索数据由折淘客接口提供；推广链接与淘口令/京口令均基于 .env 中的 PID 生成 */
+  const dataSource = '折淘客';
 
   if (!APPKEY) {
     return res.json({
@@ -60,6 +62,7 @@ app.post('/api/search', async (req, res) => {
       totalPages: 0,
       fallbackLinks,
       zhetaokeSearchUrl,
+      dataSource,
     });
   }
 
@@ -81,6 +84,7 @@ app.post('/api/search', async (req, res) => {
       totalPages,
       fallbackLinks: cached.fallbackLinks,
       zhetaokeSearchUrl: cached.zhetaokeSearchUrl,
+      dataSource,
     });
   }
 
@@ -109,6 +113,7 @@ app.post('/api/search', async (req, res) => {
       totalPages,
       fallbackLinks,
       zhetaokeSearchUrl,
+      dataSource,
     });
   } catch (err) {
     // 折淘客返回网页（登录/授权页）时视为无接口数据，直接走选品库，不向用户报错
@@ -125,6 +130,7 @@ app.post('/api/search', async (req, res) => {
         totalPages: 0,
         fallbackLinks,
         zhetaokeSearchUrl,
+        dataSource,
       });
     }
     console.error('Zhetaoke search error:', err.message);
@@ -139,6 +145,7 @@ app.post('/api/search', async (req, res) => {
       totalPages: 0,
       fallbackLinks,
       zhetaokeSearchUrl,
+      dataSource,
     });
   }
 });

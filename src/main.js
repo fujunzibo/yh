@@ -61,6 +61,7 @@ function App() {
         totalPages: data.totalPages ?? 0,
         fallbackLinks: data.fallbackLinks || [],
         zhetaokeSearchUrl: data.zhetaokeSearchUrl || null,
+        dataSource: data.dataSource || null,
         htmlContent: data.htmlContent || null,
       };
       setState({ result, loading: false });
@@ -103,25 +104,88 @@ function App() {
       listEl.textContent = '';
       if (result && result.items && result.items.length > 0) {
         const list = createElement('div', { className: 'results' });
+        if (result.dataSource) {
+          list.appendChild(
+            createElement('div', { className: 'data-source-hint' }, [
+              createElement('span', { className: 'data-source-label' }, ['数据来自 ']),
+              createElement('strong', {}, [result.dataSource]),
+              createElement('span', {}, ['；推广链接与淘口令/京口令根据您的 PID 生成']),
+            ])
+          );
+        }
         result.items.forEach((it) => {
           const link = it.link || '#';
-          const itemEl = createElement(
-            'a',
-            { className: 'item item-link', href: link, target: '_blank', rel: 'noopener noreferrer' },
-            [
-              createElement('img', { className: 'item-pic', src: it.pic || '', alt: '' }),
-              createElement('div', { className: 'item-body' }, [
-                createElement('h3', { className: 'item-title' }, [it.title || '商品']),
-                createElement('div', { className: 'item-meta' }, [
-                  createElement('span', { className: 'item-price' }, [`¥ ${Number(it.price).toFixed(2)}`]),
-                  it.source ? createElement('span', { className: 'item-source' }, [`来自${it.source}`]) : null,
-                  it.coupon ? createElement('span', { className: 'item-coupon' }, [it.coupon]) : null,
+          const hasTkl = !!(it.taoKouLing && it.taoKouLing.trim());
+          const hasJkl = !!(it.jingKouLing && it.jingKouLing.trim());
+          const itemWrap = createElement('div', { className: 'item-wrap' }, [
+            createElement(
+              'a',
+              { className: 'item item-link', href: link, target: '_blank', rel: 'noopener noreferrer' },
+              [
+                createElement('img', { className: 'item-pic', src: it.pic || '', alt: '' }),
+                createElement('div', { className: 'item-body' }, [
+                  createElement('h3', { className: 'item-title' }, [it.title || '商品']),
+                  createElement('div', { className: 'item-meta' }, [
+                    createElement('span', { className: 'item-price' }, [`¥ ${Number(it.price).toFixed(2)}`]),
+                    it.source ? createElement('span', { className: 'item-source' }, [`来自${it.source}`]) : null,
+                    it.coupon ? createElement('span', { className: 'item-coupon' }, [it.coupon]) : null,
+                  ]),
                 ]),
-              ]),
-              createElement('span', { className: 'item-go' }, ['去购买']),
-            ]
-          );
-          list.appendChild(itemEl);
+                createElement('span', { className: 'item-go' }, ['去购买']),
+              ]
+            ),
+            (hasTkl || hasJkl)
+              ? createElement(
+                  'div',
+                  { className: 'item-kouling' },
+                  [
+                    hasTkl
+                      ? createElement(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'btn-copy kouling-copy',
+                            title: '复制后打开淘宝 App 即可',
+                            onclick: (e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              navigator.clipboard.writeText(it.taoKouLing).then(() => {
+                                const btn = e.target;
+                                const oldText = btn.textContent;
+                                btn.textContent = '已复制';
+                                setTimeout(() => { btn.textContent = oldText; }, 1500);
+                              });
+                            },
+                          },
+                          ['复制淘口令']
+                        )
+                      : null,
+                    hasJkl
+                      ? createElement(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'btn-copy kouling-copy',
+                            title: '复制后打开京东 App 即可',
+                            onclick: (e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              navigator.clipboard.writeText(it.jingKouLing).then(() => {
+                                const btn = e.target;
+                                const oldText = btn.textContent;
+                                btn.textContent = '已复制';
+                                setTimeout(() => { btn.textContent = oldText; }, 1500);
+                              });
+                            },
+                          },
+                          ['复制京口令']
+                        )
+                      : null,
+                  ].filter(Boolean)
+                )
+              : null,
+          ].filter(Boolean));
+          list.appendChild(itemWrap);
         });
         listEl.appendChild(list);
         if (result.totalPages > 1) {
