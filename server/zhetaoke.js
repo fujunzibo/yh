@@ -228,26 +228,46 @@ async function apiConvertToAffiliate(appkey, itemId, options = {}) {
   });
 }
 
+/** 从折淘客通用返回中提取淘口令字符串（兼容多种返回格式） */
+function parseTaoKouLingFromRaw(raw) {
+  if (!raw || raw.__html) return '';
+  const keys = ['model', 'content', 'data', 'tao_kou_ling', 'tkl', 'result', 'info', 'return', 'msg'];
+  for (const k of keys) {
+    const v = raw[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    if (v && typeof v === 'object') {
+      const inner = v.content ?? v.model ?? v.data ?? v.tao_kou_ling ?? v.tkl ?? v.msg ?? v.info ?? '';
+      if (typeof inner === 'string' && inner.trim()) return inner.trim();
+    }
+  }
+  return '';
+}
+
 /**
  * 淘口令创建：根据「带 PID 的推广链接」生成淘口令，便于复制到淘宝 App 打开
  * 需先有高佣转链得到的链接；淘口令与 .env 中的 ZHETAOKE_TAOBAO_PID 绑定
+ * 依次尝试 BASE_LINGQUAN、BASE_API_10003，兼容多种返回格式
  */
 async function createTaoKouLing(appkey, promotionUrl, text = '') {
   if (!promotionUrl || typeof promotionUrl !== 'string') return '';
-  try {
-    const encoded = encodeURIComponent(promotionUrl);
-    const raw = await request('/user/open/open_tkl_create.aspx', {
-      appkey: appkey ?? process.env.ZHETAOKE_APPKEY,
-      url: encoded,
-      content: encoded,
-      ...(text ? { text: String(text).slice(0, 100) } : {}),
-    }, BASE_LINGQUAN);
-    if (raw?.__html) return '';
-    const tkl = raw?.model ?? raw?.content ?? raw?.data ?? raw?.tao_kou_ling ?? raw?.tkl ?? '';
-    return typeof tkl === 'string' ? tkl : (tkl?.content ?? tkl?.model ?? '');
-  } catch (_) {
-    return '';
+  const encoded = encodeURIComponent(promotionUrl);
+  const params = {
+    appkey: appkey ?? process.env.ZHETAOKE_APPKEY,
+    url: encoded,
+    content: encoded,
+    ...(text ? { text: String(text).slice(0, 100) } : {}),
+  };
+  const bases = [BASE_LINGQUAN, BASE_API_10003];
+  for (const base of bases) {
+    try {
+      const raw = await request('/user/open/open_tkl_create.aspx', params, base);
+      const tkl = parseTaoKouLingFromRaw(raw);
+      if (tkl) return tkl;
+    } catch (_) {
+      continue;
+    }
   }
+  return '';
 }
 
 /**

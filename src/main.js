@@ -117,6 +117,31 @@ function App() {
           const link = it.link || '#';
           const hasTkl = !!(it.taoKouLing && it.taoKouLing.trim());
           const hasJkl = !!(it.jingKouLing && it.jingKouLing.trim());
+          const copyBtn = (label, textToCopy, title) =>
+            createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'btn-copy kouling-copy',
+                title: title || '复制',
+                onclick: (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  navigator.clipboard.writeText(textToCopy).then(() => {
+                    const btn = e.target;
+                    const oldText = btn.textContent;
+                    btn.textContent = '已复制';
+                    setTimeout(() => { btn.textContent = oldText; }, 1500);
+                  });
+                },
+              },
+              [label]
+            );
+          const koulingBtns = [
+            hasTkl ? copyBtn('复制淘口令', it.taoKouLing, '复制后打开淘宝 App') : null,
+            hasJkl ? copyBtn('复制京口令', it.jingKouLing, '复制后打开京东 App') : null,
+            link && link !== '#' ? copyBtn('复制推广链接', link, '复制带您 PID 的推广链接') : null,
+          ].filter(Boolean);
           const itemWrap = createElement('div', { className: 'item-wrap' }, [
             createElement(
               'a',
@@ -134,55 +159,8 @@ function App() {
                 createElement('span', { className: 'item-go' }, ['去购买']),
               ]
             ),
-            (hasTkl || hasJkl)
-              ? createElement(
-                  'div',
-                  { className: 'item-kouling' },
-                  [
-                    hasTkl
-                      ? createElement(
-                          'button',
-                          {
-                            type: 'button',
-                            className: 'btn-copy kouling-copy',
-                            title: '复制后打开淘宝 App 即可',
-                            onclick: (e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              navigator.clipboard.writeText(it.taoKouLing).then(() => {
-                                const btn = e.target;
-                                const oldText = btn.textContent;
-                                btn.textContent = '已复制';
-                                setTimeout(() => { btn.textContent = oldText; }, 1500);
-                              });
-                            },
-                          },
-                          ['复制淘口令']
-                        )
-                      : null,
-                    hasJkl
-                      ? createElement(
-                          'button',
-                          {
-                            type: 'button',
-                            className: 'btn-copy kouling-copy',
-                            title: '复制后打开京东 App 即可',
-                            onclick: (e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              navigator.clipboard.writeText(it.jingKouLing).then(() => {
-                                const btn = e.target;
-                                const oldText = btn.textContent;
-                                btn.textContent = '已复制';
-                                setTimeout(() => { btn.textContent = oldText; }, 1500);
-                              });
-                            },
-                          },
-                          ['复制京口令']
-                        )
-                      : null,
-                  ].filter(Boolean)
-                )
+            koulingBtns.length
+              ? createElement('div', { className: 'item-kouling' }, koulingBtns)
               : null,
           ].filter(Boolean));
           list.appendChild(itemWrap);
