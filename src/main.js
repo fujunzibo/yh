@@ -27,46 +27,158 @@ function createElement(tag, attrs = {}, children = []) {
   return el;
 }
 
+function copyBtn(label, textToCopy, title) {
+  return createElement(
+    'button',
+    {
+      type: 'button',
+      className: 'btn-copy kouling-copy',
+      title: title || '复制',
+      onclick: (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        navigator.clipboard.writeText(textToCopy).then(() => {
+          const btn = e.target;
+          const oldText = btn.textContent;
+          btn.textContent = '已复制';
+          setTimeout(() => { btn.textContent = oldText; }, 1500);
+        });
+      },
+    },
+    [label]
+  );
+}
+
+function renderItemCard(it) {
+  const link = it.link || '#';
+  const retail = it.retailUrl && it.retailUrl !== link ? it.retailUrl : '';
+  const hasTkl = !!(it.taoKouLing && it.taoKouLing.trim());
+  const hasJkl = !!(it.jingKouLing && it.jingKouLing.trim());
+  const commissionRow =
+    it.commissionLabel || (it.commissionEstimate > 0)
+      ? createElement('div', { className: 'item-commission' }, [
+          it.commissionLabel ? createElement('span', { className: 'commission-label' }, [it.commissionLabel]) : null,
+          it.commissionEstimate > 0 && !it.commissionLabel
+            ? createElement('span', { className: 'commission-label' }, [`预估佣 ¥${Number(it.commissionEstimate).toFixed(2)}`])
+            : null,
+        ].filter(Boolean))
+      : null;
+
+  const koulingBtns = [
+    hasTkl ? copyBtn('复制淘口令', it.taoKouLing, '复制后打开淘宝 App') : null,
+    hasJkl ? copyBtn('复制京口令', it.jingKouLing, '复制后打开京东 App') : null,
+    link && link !== '#' ? copyBtn('复制推广链接', link, '含您 PID 的推广链接') : null,
+    retail ? copyBtn('复制商品页链接', retail, '原始商品页（非 PID 链）') : null,
+  ].filter(Boolean);
+
+  return createElement('div', { className: 'item-wrap' }, [
+    createElement(
+      'a',
+      { className: 'item item-link', href: link, target: '_blank', rel: 'noopener noreferrer' },
+      [
+        createElement('img', { className: 'item-pic', src: it.pic || '', alt: '' }),
+        createElement('div', { className: 'item-body' }, [
+          createElement('h3', { className: 'item-title' }, [it.title || '商品']),
+          createElement('div', { className: 'item-meta' }, [
+            createElement('span', { className: 'item-price' }, [`¥ ${Number(it.price || 0).toFixed(2)}（参考）`]),
+            it.source ? createElement('span', { className: 'item-source' }, [it.source]) : null,
+            it.coupon ? createElement('span', { className: 'item-coupon' }, [it.coupon]) : null,
+          ]),
+          commissionRow,
+        ]),
+        createElement('span', { className: 'item-go' }, ['推广购买']),
+      ]
+    ),
+    koulingBtns.length ? createElement('div', { className: 'item-kouling' }, koulingBtns) : null,
+  ].filter(Boolean));
+}
+
 function App() {
-  let query = '';
+  let keyword = '';
+  let priceMin = '';
+  let priceMax = '';
   let loading = false;
-  let result = null; // { parsed, items } or { error }
+  /** 请求进行中的目标页码（用于区分「搜索」与「下一页」加载提示；勿用旧 result.page） */
+  let loadingPage = null;
+  let result = null;
   let mounted = false;
 
   function setState(updates) {
-    if (updates.query !== undefined) query = updates.query;
+    if (updates.keyword !== undefined) keyword = updates.keyword;
+    if (updates.priceMin !== undefined) priceMin = updates.priceMin;
+    if (updates.priceMax !== undefined) priceMax = updates.priceMax;
     if (updates.loading !== undefined) loading = updates.loading;
+    if (updates.loadingPage !== undefined) loadingPage = updates.loadingPage;
     if (updates.result !== undefined) result = updates.result;
     if (mounted) updateDOM();
   }
 
-  async function doSearch(page = 1) {
-    const q = (query || '').trim();
-    if (!q) return;
-    setState({ loading: true, result: page === 1 ? null : result });
+  function buildSearchBody(page, { resetSession = false } = {}) {
+    const kw = (keyword || '').trim();
+    const body = { keyword: kw, page, pageSize: 20 };
+    if (resetSession) body.resetSession = true;
+    const minStr = String(priceMin || '').trim();
+    const maxStr = String(priceMax || '').trim();
+    if (minStr !== '') {
+      const n = parseFloat(minStr);
+      if (Number.isFinite(n) && n >= 0) body.minPrice = n;
+    }
+    if (maxStr !== '') {
+      const n = parseFloat(maxStr);
+      if (Number.isFinite(n) && n >= 0) body.maxPrice = n;
+    }
+    return body;
+  }
+
+  function resolveSearchPage(raw) {
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 1) return Math.floor(raw);
+    return 1;
+  }
+
+  async function doSearch(rawPage, { resetSession = false } = {}) {
+    const page = resolveSearchPage(rawPage);
+    const kw = (keyword || '').trim();
+    if (!kw) return;
+    setState({ loading: true, loadingPage: page, result: page === 1 && resetSession ? null : result });
     try {
       const res = await fetch(`${API_BASE}/api/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: q, page, pageSize: 20 }),
+        body: JSON.stringify(buildSearchBody(page, { resetSession })),
       });
       const data = await res.json();
-      const result = {
-        error: data.error || null,
-        parsed: data.parsed || null,
-        items: data.items || [],
-        total: data.total ?? 0,
-        page: data.page ?? 1,
-        pageSize: data.pageSize ?? 20,
-        totalPages: data.totalPages ?? 0,
-        fallbackLinks: data.fallbackLinks || [],
-        zhetaokeSearchUrl: data.zhetaokeSearchUrl || null,
-        dataSource: data.dataSource || null,
-        htmlContent: data.htmlContent || null,
-      };
-      setState({ result, loading: false });
+      setState({
+        result: {
+          error: data.error || null,
+          apiHint: data.apiHint || null,
+          parsed: data.parsed || null,
+          taobaoItems: data.taobaoItems || [],
+          jdItems: data.jdItems || [],
+          taobaoTotal: data.taobaoTotal ?? 0,
+          jdTotal: data.jdTotal ?? 0,
+          taobaoTotalPages: data.taobaoTotalPages ?? 1,
+          jdTotalPages: data.jdTotalPages ?? 1,
+          items: data.items || [],
+          total: data.total ?? 0,
+          page: data.page ?? 1,
+          pageSize: data.pageSize ?? 20,
+          totalPages: data.totalPages ?? 1,
+          fallbackLinks: data.fallbackLinks || [],
+          zhetaokeSearchUrl: data.zhetaokeSearchUrl || null,
+          dataSource: data.dataSource || null,
+          quoteNote: data.quoteNote || null,
+          flowNote: data.flowNote || null,
+          taobaoRetailSearchUrl: data.taobaoRetailSearchUrl || null,
+          jdRetailSearchUrl: data.jdRetailSearchUrl || null,
+          moreWavesAvailable: data.moreWavesAvailable !== false,
+          newTaobaoCount: data.newTaobaoCount,
+          newJdCount: data.newJdCount,
+        },
+        loading: false,
+        loadingPage: null,
+      });
     } catch (e) {
-      setState({ result: { error: e.message || '网络错误' }, loading: false });
+      setState({ result: { error: e.message || '网络错误' }, loading: false, loadingPage: null });
     }
   }
 
@@ -94,116 +206,184 @@ function App() {
 
     if (msgEl) {
       msgEl.textContent = '';
-      if (loading) msgEl.appendChild(createElement('div', { className: 'message' }, ['正在搜索…']));
-      else if (result?.error && !result?.zhetaokeSearchUrl) msgEl.appendChild(createElement('div', { className: 'message error' }, [result.error]));
+      if (loading) {
+        const targetPage = loadingPage != null ? loadingPage : result?.page ?? 1;
+        const msg =
+          targetPage > 1
+            ? '正在加载下一页（必要时向联盟续拉并合并到当前结果）…'
+            : '正在搜索淘宝客与京东联盟商品…';
+        msgEl.appendChild(createElement('div', { className: 'message' }, [msg]));
+      }
+      else if (result?.apiHint) {
+        msgEl.appendChild(createElement('div', { className: 'message warn' }, [result.apiHint]));
+      } else if (result?.error && !result?.zhetaokeSearchUrl) {
+        msgEl.appendChild(createElement('div', { className: 'message error' }, [result.error]));
+      } else if (result?.newTaobaoCount != null || result?.newJdCount != null) {
+        const nt = result.newTaobaoCount ?? 0;
+        const nj = result.newJdCount ?? 0;
+        if (nt + nj > 0) {
+          msgEl.appendChild(
+            createElement('div', { className: 'message info' }, [
+              `本次从联盟补充并合并：淘宝 ${nt} 条、京东 ${nj} 条（已去重）。`,
+            ])
+          );
+        }
+      }
     }
 
     const links = result?.fallbackLinks || [];
 
     if (listEl) {
       listEl.textContent = '';
-      if (result && result.items && result.items.length > 0) {
-        const list = createElement('div', { className: 'results' });
-        if (result.dataSource) {
-          list.appendChild(
-            createElement('div', { className: 'data-source-hint' }, [
-              createElement('span', { className: 'data-source-label' }, ['数据来自 ']),
-              createElement('strong', {}, [result.dataSource]),
-              createElement('span', {}, ['；推广链接与淘口令/京口令根据您的 PID 生成']),
+
+      if (result?.flowNote) {
+        listEl.appendChild(createElement('div', { className: 'flow-note' }, [result.flowNote]));
+      }
+
+      const hasTaobao = result?.taobaoItems?.length > 0;
+      const hasJd = result?.jdItems?.length > 0;
+      const hasAnyItems = hasTaobao || hasJd;
+      /** 已有多页或当前不在第 1 页时，即使本屏无商品也要保留分页，否则会整页空白且无法返回 */
+      const keepNavShell =
+        result &&
+        (hasAnyItems || (result.page ?? 1) > 1 || (result.totalPages ?? 1) > 1);
+
+      if (keepNavShell) {
+        if (hasAnyItems) {
+          const wrap = createElement('div', { className: 'results-dual' });
+
+          if (result.dataSource || result.quoteNote) {
+            wrap.appendChild(
+              createElement('div', { className: 'data-source-hint' }, [
+                result.dataSource
+                  ? createElement('span', {}, [
+                      createElement('span', { className: 'data-source-label' }, ['数据：']),
+                      createElement('strong', {}, [result.dataSource]),
+                    ])
+                  : null,
+                result.quoteNote ? createElement('span', { className: 'quote-note' }, [` ${result.quoteNote}`]) : null,
+              ].filter(Boolean))
+            );
+          }
+
+          const taoHeader = createElement('div', { className: 'channel-header' }, [
+            createElement('h2', { className: 'channel-title' }, ['一、淘宝客（折淘客 PID 转链）']),
+            createElement('p', { className: 'channel-sub' }, [
+              '关键词已在淘宝客高佣库中匹配；推广链接含您的 ',
+              createElement('strong', {}, ['ZHETAOKE_TAOBAO_PID']),
+              `。本列共 ${result.taobaoTotal ?? 0} 条，本页展示 ${result.taobaoItems.length} 条。`,
+            ]),
+            result.taobaoRetailSearchUrl
+              ? createElement('a', {
+                className: 'channel-retail-link',
+                href: result.taobaoRetailSearchUrl,
+                target: '_blank',
+                rel: 'noopener noreferrer',
+              }, ['打开淘宝官网搜索对照 →'])
+              : null,
+          ].filter(Boolean));
+
+          const jdHeader = createElement('div', { className: 'channel-header' }, [
+            createElement('h2', { className: 'channel-title' }, ['二、京东联盟（折京客 / 京东 PID 转链）']),
+            createElement('p', { className: 'channel-sub' }, [
+              '关键词已在京东联盟推广商品中匹配；推广链接含您的 ',
+              createElement('strong', {}, ['ZHETAOKE_JD_PID / unionId']),
+              `。本列共 ${result.jdTotal ?? 0} 条，本页展示 ${result.jdItems.length} 条。`,
+            ]),
+            result.jdRetailSearchUrl
+              ? createElement('a', {
+                className: 'channel-retail-link',
+                href: result.jdRetailSearchUrl,
+                target: '_blank',
+                rel: 'noopener noreferrer',
+              }, ['打开京东官网搜索对照 →'])
+              : null,
+          ].filter(Boolean));
+
+          const taoBlock = createElement('section', { className: 'channel-block' }, [
+            taoHeader,
+            createElement('div', { className: 'results' }, (result.taobaoItems || []).map(renderItemCard)),
+          ]);
+          const jdBlock = createElement('section', { className: 'channel-block' }, [
+            jdHeader,
+            createElement('div', { className: 'results' }, (result.jdItems || []).map(renderItemCard)),
+          ]);
+
+          wrap.appendChild(taoBlock);
+          wrap.appendChild(jdBlock);
+          listEl.appendChild(wrap);
+        } else {
+          listEl.appendChild(
+            createElement('div', { className: 'page-empty-banner' }, [
+              createElement('p', { className: 'page-empty-title' }, ['本页暂无商品']),
+              createElement('p', { className: 'page-empty-desc' }, [
+                '这一屏在去重后与前面页重复或联盟未返回新数据。请点「上一页」回到有商品的页，或再试「下一页」/ 换关键词搜索。',
+              ]),
             ])
           );
         }
-        result.items.forEach((it) => {
-          const link = it.link || '#';
-          const hasTkl = !!(it.taoKouLing && it.taoKouLing.trim());
-          const hasJkl = !!(it.jingKouLing && it.jingKouLing.trim());
-          const copyBtn = (label, textToCopy, title) =>
-            createElement(
-              'button',
-              {
-                type: 'button',
-                className: 'btn-copy kouling-copy',
-                title: title || '复制',
-                onclick: (e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  navigator.clipboard.writeText(textToCopy).then(() => {
-                    const btn = e.target;
-                    const oldText = btn.textContent;
-                    btn.textContent = '已复制';
-                    setTimeout(() => { btn.textContent = oldText; }, 1500);
-                  });
-                },
-              },
-              [label]
-            );
-          const koulingBtns = [
-            hasTkl ? copyBtn('复制淘口令', it.taoKouLing, '复制后打开淘宝 App') : null,
-            hasJkl ? copyBtn('复制京口令', it.jingKouLing, '复制后打开京东 App') : null,
-            link && link !== '#' ? copyBtn('复制推广链接', link, '复制带您 PID 的推广链接') : null,
-          ].filter(Boolean);
-          const itemWrap = createElement('div', { className: 'item-wrap' }, [
-            createElement(
-              'a',
-              { className: 'item item-link', href: link, target: '_blank', rel: 'noopener noreferrer' },
-              [
-                createElement('img', { className: 'item-pic', src: it.pic || '', alt: '' }),
-                createElement('div', { className: 'item-body' }, [
-                  createElement('h3', { className: 'item-title' }, [it.title || '商品']),
-                  createElement('div', { className: 'item-meta' }, [
-                    createElement('span', { className: 'item-price' }, [`¥ ${Number(it.price).toFixed(2)}`]),
-                    it.source ? createElement('span', { className: 'item-source' }, [`来自${it.source}`]) : null,
-                    it.coupon ? createElement('span', { className: 'item-coupon' }, [it.coupon]) : null,
-                  ]),
-                ]),
-                createElement('span', { className: 'item-go' }, ['去购买']),
-              ]
-            ),
-            koulingBtns.length
-              ? createElement('div', { className: 'item-kouling' }, koulingBtns)
-              : null,
-          ].filter(Boolean));
-          list.appendChild(itemWrap);
-        });
-        listEl.appendChild(list);
+
         if (result.totalPages > 1) {
-          const pagination = createElement('div', { className: 'pagination' }, [
-            createElement('button', {
-              type: 'button',
-              className: 'pagination-btn',
-              disabled: result.page <= 1,
-              onclick: () => doSearch(result.page - 1),
-            }, ['上一页']),
-            createElement('span', { className: 'pagination-info' }, [
-              `第 ${result.page} / ${result.totalPages} 页，共 ${result.total} 条`,
-            ]),
-            createElement('button', {
-              type: 'button',
-              className: 'pagination-btn',
-              disabled: result.page >= result.totalPages,
-              onclick: () => doSearch(result.page + 1),
-            }, ['下一页']),
-          ]);
-          listEl.appendChild(pagination);
+          listEl.appendChild(
+            createElement('div', { className: 'pagination' }, [
+              createElement('button', {
+                type: 'button',
+                className: 'pagination-btn',
+                disabled: result.page <= 1,
+                onclick: () => doSearch(result.page - 1),
+              }, ['上一页']),
+              createElement('span', { className: 'pagination-info' }, [
+                `第 ${result.page} / ${result.totalPages} 页 · 淘宝 ${result.taobaoTotal ?? 0} 条 · 京东 ${result.jdTotal ?? 0} 条`,
+                result.moreWavesAvailable
+                  ? createElement('span', { className: 'pagination-waves-hint' }, [
+                      ' · 列表不够时会自动续拉联盟数据并合并',
+                    ])
+                  : null,
+              ].filter(Boolean)),
+              createElement('button', {
+                type: 'button',
+                className: 'pagination-btn',
+                title: '翻到下一页；若当前合并列表不够该页，会自动向联盟再拉一批并合并',
+                disabled: loading || (result.page >= result.totalPages && !result.moreWavesAvailable),
+                onclick: () => doSearch(result.page + 1),
+              }, ['下一页']),
+            ])
+          );
+        } else if (result.moreWavesAvailable && hasAnyItems) {
+          listEl.appendChild(
+            createElement('div', { className: 'pagination' }, [
+              createElement('span', { className: 'pagination-info' }, [
+                `当前共 ${result.totalPages} 页；点「下一页」可继续翻页，不足时会自动续拉联盟数据。`,
+              ]),
+              createElement('button', {
+                type: 'button',
+                className: 'pagination-btn',
+                title: '继续拉取联盟数据并合并到当前搜索结果',
+                disabled: loading,
+                onclick: () => doSearch(result.totalPages + 1),
+              }, ['下一页']),
+            ])
+          );
         }
-        if (result.fallbackLinks?.length) {
-          const tip = createElement('p', { className: 'fallback-tip secondary' }, ['或前往：']);
+
+        if (links.length) {
+          listEl.appendChild(createElement('p', { className: 'fallback-tip secondary' }, ['更多入口：']));
           const linkRow = createElement('div', { className: 'fallback-links' });
-          result.fallbackLinks.forEach((l) => {
+          links.forEach((l) => {
             linkRow.appendChild(
               createElement('a', { className: 'fallback-link', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, [l.name])
             );
           });
-          listEl.appendChild(tip);
           listEl.appendChild(linkRow);
         }
       } else if (result && links.length > 0) {
-        const tip = createElement('p', { className: 'fallback-tip' }, ['您也可以直接前往各平台搜索：']);
+        listEl.appendChild(createElement('p', { className: 'fallback-tip' }, ['暂无联盟商品数据，您可前往：']));
         const linkRow = createElement('div', { className: 'fallback-links' });
         links.forEach((l) => {
-          linkRow.appendChild(createElement('a', { className: 'fallback-link', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, [l.name]));
+          linkRow.appendChild(
+            createElement('a', { className: 'fallback-link', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, [l.name])
+          );
         });
-        listEl.appendChild(tip);
         listEl.appendChild(linkRow);
       }
     }
@@ -212,25 +392,68 @@ function App() {
   const app = createElement('div', { className: 'app' }, [
     createElement('header', { className: 'header' }, [
       createElement('h1', {}, ['优惠购']),
-      createElement('p', {}, ['输入需求，自动解析关键词与价格，按价格从低到高展示']),
+      createElement('p', {}, ['一次搜索：淘宝客高佣商品 + 京东联盟商品，分别生成推广链接']),
     ]),
     createElement('div', { className: 'search-box' }, [
-      createElement('input', {
-        type: 'text',
-        placeholder: '例如：价格1000元左右的手机',
-        value: query,
-        oninput(e) {
-          setState({ query: e.target.value });
-        },
-        onkeydown(e) {
-          if (e.key === 'Enter') doSearch();
-        },
-      }),
-      createElement('button', {
-        type: 'button',
-        disabled: loading,
-        onclick: doSearch,
-      }, ['搜索']),
+      createElement('div', { className: 'search-row' }, [
+        createElement('label', { className: 'search-label', htmlFor: 'search-keyword' }, ['品名']),
+        createElement('input', {
+          id: 'search-keyword',
+          type: 'text',
+          className: 'search-input search-input-grow',
+          placeholder: '例如：荣耀手机、蓝牙耳机',
+          value: keyword,
+          oninput(e) {
+            setState({ keyword: e.target.value });
+          },
+          onkeydown(e) {
+            if (e.key === 'Enter') doSearch(1, { resetSession: true });
+          },
+        }),
+      ]),
+      createElement('div', { className: 'search-row search-row-actions' }, [
+        createElement('label', { className: 'search-label', htmlFor: 'search-price-min' }, ['价格']),
+        createElement('div', { className: 'price-range' }, [
+          createElement('input', {
+            id: 'search-price-min',
+            type: 'number',
+            className: 'search-input search-input-price',
+            placeholder: '最低',
+            min: '0',
+            step: '1',
+            value: priceMin,
+            oninput(e) {
+              setState({ priceMin: e.target.value });
+            },
+            onkeydown(e) {
+              if (e.key === 'Enter') doSearch(1, { resetSession: true });
+            },
+          }),
+          createElement('span', { className: 'price-sep' }, ['—']),
+          createElement('input', {
+            id: 'search-price-max',
+            type: 'number',
+            className: 'search-input search-input-price',
+            placeholder: '最高',
+            min: '0',
+            step: '1',
+            value: priceMax,
+            oninput(e) {
+              setState({ priceMax: e.target.value });
+            },
+            onkeydown(e) {
+              if (e.key === 'Enter') doSearch(1, { resetSession: true });
+            },
+          }),
+          createElement('span', { className: 'price-unit' }, ['元']),
+        ]),
+        createElement('button', {
+          type: 'button',
+          className: 'search-submit',
+          disabled: loading,
+          onclick: () => doSearch(1, { resetSession: true }),
+        }, ['搜索']),
+      ]),
     ]),
     createElement('div', { className: 'parsed-wrap' }),
     createElement('div', { className: 'message-wrap' }),

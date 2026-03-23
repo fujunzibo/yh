@@ -24,7 +24,7 @@ body {
 }
 
 .app {
-  max-width: 720px;
+  max-width: 960px;
   margin: 0 auto;
   padding: 2rem 1rem;
 }
@@ -52,12 +52,31 @@ body {
 
 .search-box {
   display: flex;
+  flex-direction: column;
   gap: 0.75rem;
   margin-bottom: 1.5rem;
 }
 
-.search-box input {
-  flex: 1;
+.search-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+
+.search-row-actions {
+  align-items: stretch;
+}
+
+.search-label {
+  flex: 0 0 auto;
+  width: 2.75rem;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  line-height: 2.75rem;
+}
+
+.search-input {
   padding: 0.875rem 1rem;
   font-size: 1rem;
   font-family: inherit;
@@ -69,15 +88,47 @@ body {
   transition: border-color 0.2s;
 }
 
-.search-box input::placeholder {
+.search-input-grow {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.search-input-price {
+  width: 6.5rem;
+  min-width: 0;
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+}
+
+.search-input::placeholder {
   color: var(--text-muted);
 }
 
-.search-box input:focus {
+.search-input:focus {
   border-color: var(--accent);
 }
 
-.search-box button {
+.price-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.price-sep {
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.price-unit {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.search-submit {
   padding: 0.875rem 1.5rem;
   font-size: 1rem;
   font-weight: 600;
@@ -89,15 +140,28 @@ body {
   cursor: pointer;
   transition: background 0.2s;
   white-space: nowrap;
+  align-self: center;
 }
 
-.search-box button:hover {
+.search-submit:hover {
   background: var(--accent-hover);
 }
 
-.search-box button:disabled {
+.search-submit:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* 隐藏 number 上下箭头，避免占宽 */
+.search-input-price::-webkit-outer-spin-button,
+.search-input-price::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.search-input-price[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
 }
 
 .parsed {
@@ -133,6 +197,76 @@ body {
 .message.info {
   color: var(--accent);
   background: rgba(245, 158, 11, 0.1);
+}
+
+.message.warn {
+  color: var(--text);
+  background: rgba(245, 158, 11, 0.18);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.flow-note {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.55;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1.25rem;
+  background: rgba(24, 24, 29, 0.8);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+
+.results-dual {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.channel-block {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+  background: rgba(24, 24, 29, 0.5);
+}
+
+.channel-header {
+  margin-bottom: 1rem;
+}
+
+.channel-title {
+  margin: 0 0 0.35rem 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.channel-sub {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.channel-retail-link {
+  display: inline-block;
+  font-size: 0.85rem;
+  color: var(--accent-hover);
+  text-decoration: none;
+}
+
+.channel-retail-link:hover {
+  text-decoration: underline;
+}
+
+.item-commission {
+  margin-top: 0.35rem;
+}
+
+.commission-label {
+  font-size: 0.8rem;
+  color: var(--success);
 }
 
 .webpage-title {
@@ -380,6 +514,33 @@ body {
 
 .pagination-info {
   font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.pagination-waves-hint {
+  font-weight: 400;
+  opacity: 0.92;
+}
+
+.page-empty-banner {
+  margin: 1rem 0 1.25rem;
+  padding: 1rem 1.25rem;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+}
+
+.page-empty-title {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.page-empty-desc {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
   color: var(--text-muted);
 }
 

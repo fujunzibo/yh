@@ -299,8 +299,34 @@ function parseItemList(raw) {
   return list;
 }
 
+/** 联盟字段不齐时用于去重/合并的稳定键（勿留空，否则多条会塌成同一 itemId） */
+export function stableItemIdFromRow(item) {
+  if (!item || typeof item !== 'object') return 'x:empty';
+  const raw =
+    item.tao_id ?? item.skuId ?? item.item_id ?? item.goods_id ?? item.num_iid ?? item.id;
+  if (raw != null && String(raw).trim() !== '') return String(raw).trim();
+  let link =
+    item.item_url ??
+    item.url ??
+    item.coupon_click_url ??
+    item.click_url ??
+    item.link ??
+    item.goods_link ??
+    '';
+  if (item.materialUrl) {
+    const m = String(item.materialUrl);
+    link = link || (m.startsWith('http') ? m : 'https://' + m.replace(/^https?:\/\//, ''));
+  }
+  link = String(link || '').trim();
+  if (link) return `u:${link.slice(0, 400)}`;
+  const title = String(item.title ?? item.tao_title ?? item.skuName ?? item.goods_name ?? '').slice(0, 120);
+  const price = String(item.quanhou_jiage ?? item.zk_final_price ?? item.price ?? item.size ?? '');
+  const pic = String(item.pict_url ?? item.goods_thumb_url ?? item.pic_url ?? item.image ?? '').slice(0, 100);
+  return `f:${title}\0${price}\0${pic}`;
+}
+
 function normalizeItem(item) {
-  const id = item.tao_id ?? item.skuId ?? item.item_id ?? item.goods_id ?? item.num_iid ?? item.id;
+  const id = stableItemIdFromRow(item);
   const price = parseFloat(
     item.quanhou_jiage ?? item.zk_final_price ?? item.price ?? item.size ?? item.coupon_price ?? item.final_price ?? item.quan_price
     ?? item.priceInfo?.price ?? item.wlUnitPrice ?? 0
@@ -313,7 +339,29 @@ function normalizeItem(item) {
   const coupon = item.coupon_info ?? item.coupon_amount ?? item.coupon ?? '';
   const linkPic = ((link || '') + ' ' + (item.pict_url ?? item.pic_url ?? item.image ?? '')).toLowerCase();
   const source = linkPic.includes('jd.com') || linkPic.includes('360buyimg') ? '京东' : '淘宝';
-  return { itemId: id, title, price, pic, link, coupon, source, raw: item };
+  const retailUrl = link;
+  const rateStr = item.tkrate3 ?? item.commission_rate ?? item.commissionShare ?? item.cpsFee ?? item.tk_rate ?? item.commissionInfo?.commissionShare;
+  let commissionRate = null;
+  if (rateStr != null && String(rateStr).trim() !== '') {
+    const n = parseFloat(String(rateStr).replace(/%/g, ''));
+    if (!Number.isNaN(n) && n > 0) commissionRate = n;
+  }
+  let commissionEstimate = 0;
+  if (price > 0 && commissionRate != null) {
+    commissionEstimate = Math.round(price * (commissionRate / 100) * 100) / 100;
+  }
+  const tkfee = item.tkfee ?? item.estimatedCommission ?? item.commission;
+  let commissionLabel = '';
+  if (tkfee != null && String(tkfee).trim() !== '' && !Number.isNaN(parseFloat(tkfee))) {
+    commissionLabel = `预估佣金约 ¥${parseFloat(tkfee).toFixed(2)}`;
+  } else if (commissionRate != null) {
+    commissionLabel = `佣金比例约 ${commissionRate}%`;
+  }
+  return {
+    itemId: id, title, price, pic, link, retailUrl, coupon, source,
+    commissionRate, commissionEstimate, commissionLabel,
+    raw: item,
+  };
 }
 
 /**
@@ -331,13 +379,40 @@ async function apiAll(appkey, { page = 1, page_size = 40, sort = 'price_asc', ci
     ...(q ? { q } : {}),
   }, BASE_20000);
   if (raw && raw.__html) return raw;
-  if (raw.status === 301) throw new Error('折淘客 api_all 参数错误或未授权');
+  // 301 多为「未开通超高佣/关键词分页超限/参数组合不被接受」；由搜索侧降级为空列表或改走领券站，勿抛错打断整波
+  if (raw && raw.status === 301) return raw;
   return raw;
 }
 
-/** 从商品原始对象拼接所有可检索文本（标题、描述、类目、京东 skuName 等），避免关键词过滤误杀 */
+/** 递归收集对象中的字符串（联盟返回里「荣耀」等常落在嵌套字段或链接里） */
+function appendDeepStrings(val, depth, maxDepth, out, maxStrings) {
+  if (out.length >= maxStrings || depth > maxDepth || val == null) return;
+  const t = typeof val;
+  if (t === 'string') {
+    const s = val.trim();
+    if (s) out.push(s);
+    return;
+  }
+  if (t === 'number' && Number.isFinite(val)) {
+    out.push(String(val));
+    return;
+  }
+  if (t !== 'object') return;
+  if (Array.isArray(val)) {
+    for (let i = 0; i < val.length && out.length < maxStrings; i++) {
+      appendDeepStrings(val[i], depth + 1, maxDepth, out, maxStrings);
+    }
+    return;
+  }
+  const keys = Object.keys(val);
+  for (let i = 0; i < keys.length && out.length < maxStrings; i++) {
+    appendDeepStrings(val[keys[i]], depth + 1, maxDepth, out, maxStrings);
+  }
+}
+
+/** 从商品原始对象拼接所有可检索文本（标题、链接、嵌套 JSON 中的字符串等），供模糊匹配 */
 function getSearchableText(item) {
-  const parts = [
+  const shallow = [
     item.title,
     item.tao_title,
     item.skuName,
@@ -353,145 +428,205 @@ function getSearchableText(item) {
     item.cid1Name,
     item.cid2Name,
     item.cid3Name,
-  ].filter(Boolean);
-  return parts.join(' ').toLowerCase();
+    item.brandName,
+    item.brand_name,
+    item.shop_name,
+    item.shop_title,
+    item.nick,
+    item.material_name,
+    item.subtitle,
+    item.item_subtitle,
+    item.keywords,
+    item.search_tag,
+    item.spuName,
+    item.inShopName,
+    item.item_url,
+    item.url,
+    item.coupon_click_url,
+    item.click_url,
+    item.link,
+    item.goods_link,
+    item.materialUrl,
+  ].filter((x) => x != null && String(x).trim() !== '');
+  const deep = [];
+  appendDeepStrings(item, 0, 4, deep, 100);
+  const merged = [...shallow.map((x) => String(x)), ...deep];
+  return [...new Set(merged.map((s) => s.toLowerCase()))].join(' ');
 }
 
 /**
- * 关键词匹配：标题/简介/类目/京东 skuName 等包含「完整关键词」或「任一连词段」即保留
+ * 关键词匹配：可检索文本须**同时包含**拆分后的每一个词（空格、顿号、逗号等分隔）。
+ * 无拆分时整段为一个词，子串包含即命中。不做手机/配件/品牌等额外规则。
  */
 function itemMatchesKeyword(item, lowerKw) {
   if (!lowerKw || lowerKw === '商品') return true;
   const text = getSearchableText(item);
-  if (text.includes(lowerKw)) return true;
-  for (let i = 0; i <= lowerKw.length - 2; i++) {
-    const seg = lowerKw.slice(i, i + 2);
-    if (text.includes(seg)) return true;
-  }
-  return false;
+  const tokens = lowerKw
+    .split(/[\s\u3000、，,;；|/]+/)
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length > 0);
+  if (tokens.length === 0) return true;
+  return tokens.every((tok) => text.includes(tok));
 }
 
-/** 手机配件相关词：搜 手机/智能手机/华为手机 时排除标题或类目含以下词的商品（避免只出壳膜线等） */
-const PHONE_ACCESSORY_WORDS = [
-  '配件', '手机壳', '保护壳', '手机套', '保护套', '贴膜', '钢化膜', '数据线', '充电器', '充电线',
-  '充电头', '适配器', '支架', '挂绳', '指环', '手机绳', '耳机', '耳塞', '保护膜', '背膜', '镜头膜', '车载支架',
-  '手机支架', '壳膜', '壳套', '充电宝', '移动电源',
-  '挂件', '防尘塞', '软壳', '透明壳', '气囊', '指环扣', '懒人支架', '磁吸', '硅胶套', '防摔壳',
-  '挂带', '贴纸', '小挂件', '收纳', '镜头盖', '背夹', '腕带', '钥匙扣', '吊坠', '挂链',
-  '纳米膜', '水凝膜', '防窥膜', '镜头贴', '取卡针', '卡针', '转接头', '手机扣', '吸盘', '夹子',
-  '挂扣', '绕线', '理线', '绑带', '卡托', '防丢绳', '挂脖', '出风口', '背贴', '全包壳', '半包壳',
-  '软边', '硬壳', '液态硅胶', '彩绘壳', '卡通壳', '毛绒', '玩偶挂件', '接口塞', '充电塞',
-  '收纳包', '收纳袋', '擦屏', '清洁布', '触控笔', '扩展坞', 'case', 'cover', 'film', 'protector',
-];
-
-function isPhoneAccessory(item) {
-  const text = getSearchableText(item);
-  if (PHONE_ACCESSORY_WORDS.some((w) => text.includes(w))) return true;
-  if (!/手机|智能机|电话/i.test(text)) return false;
-  return /壳|膜|套|线|支架|扣|贴|绳|挂件|挂链|指环|吸盘|夹子|塞|盖|贴纸|腕带|绑带|收纳|防尘|磁吸|硅胶|气囊|软边|硬壳|彩绘|卡通|毛绒|玩偶|绕线|理线|卡托|转接头|取卡|接口|充电塞|耳机孔/i.test(text);
+/** 原始行数据是否为京东商品（链接/主图） */
+function isRawJdRow(r) {
+  const link = (r.item_url ?? r.url ?? r.materialUrl ?? '').toLowerCase();
+  const pic = (r.pict_url ?? r.pic_url ?? r.image ?? '').toLowerCase();
+  return link.includes('jd.com') || pic.includes('360buyimg');
 }
 
-function isPhoneSearch(keyword) {
-  const k = (keyword || '').trim();
-  return /手机|智能机|电话|iphone|安卓机/i.test(k);
-}
-
-/** 搜「手机」时只保留「像手机」的商品：标题须含 手机/智能机 且含品牌或全网通/5G/内存/屏幕 等，避免只出壳膜线 */
-const PHONE_PRODUCT_INDICATORS = [
-  '华为', '苹果', '小米', 'vivo', 'oppo', '三星', '荣耀', '真我', '一加', '魅族', '中兴', '联想', '红米', '诺基亚', '索尼', '摩托',
-  '全网通', '5g', '4g', '智能手机', '智能机', '新款', '官方', '正品', '旗舰', '大屏', '双卡', '安卓', '苹果手机', '华为手机', '小米手机',
-  'iphone', 'galaxy', 'mate', 'p系列', 'nova', '畅享', '麦芒', 'redmi', 'realme', 'iqoo', '一加手机',
-  '内存', '屏幕', '英寸', 'gb', '大内存', '运行内存', '存储', '正品手机', '全新',
-];
-/** 品牌+型号/规格词：标题无「手机」但含这些词时，在「品牌+手机」搜索下也视为整机（如 华为 Mate 60 Pro） */
-const PHONE_MODEL_SPEC_WORDS = [
-  'mate', 'p系列', 'p40', 'p50', 'p60', 'nova', '畅享', '麦芒', 'redmi', 'realme', 'iqoo', 'galaxy', 'iphone',
-  '内存', '屏幕', '英寸', 'gb', '大内存', '运行内存', '存储', '旗舰', '5g', '4g', '全网通', '智能手机', '智能机', '双卡', '大屏',
-];
-
-function itemLooksLikePhone(item, keyword) {
-  const text = getSearchableText(item);
-  // 路径1：标题含「手机/智能机/电话/iphone」且含品牌或规格词 → 保留
-  if (/手机|智能机|电话|iphone|安卓机/i.test(text) && PHONE_PRODUCT_INDICATORS.some((w) => text.includes(w)))
+function dedupSearchList(arr) {
+  const seen = new Set();
+  return arr.filter((item) => {
+    const id = item.tao_id ?? item.skuId ?? item.item_id ?? item.goods_id ?? item.num_iid ?? item.id;
+    if (id == null || id === '') return true;
+    const sid = String(id);
+    if (seen.has(sid)) return false;
+    seen.add(sid);
     return true;
-  // 路径2：搜索词为「品牌+手机」（如 华为手机）时，标题含该品牌 + 型号/规格词即视为整机（如 华为 Mate 60 Pro）
-  const brandPhoneMatch = (keyword || '').trim().match(/^(.+?)手机$/);
-  if (brandPhoneMatch) {
-    const brand = brandPhoneMatch[1].trim().toLowerCase();
-    if (!brand) return false;
-    const lower = text.toLowerCase();
-    if (!lower.includes(brand)) return false;
-    if (PHONE_MODEL_SPEC_WORDS.some((w) => lower.includes(w))) return true;
-  }
-  return false;
+  });
+}
+
+/** 搜索拉取时的 HTTP 并发上限（环境变量 SEARCH_FETCH_CONCURRENCY，默认 6，上限 30） */
+function getSearchFetchConcurrency() {
+  const n = parseInt(process.env.SEARCH_FETCH_CONCURRENCY || '6', 10);
+  if (!Number.isFinite(n) || n < 1) return 6;
+  return Math.min(n, 30);
 }
 
 /**
- * 聚合搜索：优先使用 20000 端口「超高佣金商品API」拉取列表（带关键词 q、多页），再按关键词与价格筛选
+ * 固定并发池：任务队列动态领取，缩短总等待时间；适合 I/O 密集请求。
+ * 与 ensurePromotionLinks 的 runWithLimit（按批）独立，避免转链与搜索抢同一并发。
  */
-async function searchProducts(appkey, { keyword, minPrice, maxPrice }) {
+async function runPool(tasks, concurrency, fn) {
+  if (!tasks?.length) return [];
+  const results = new Array(tasks.length);
+  let next = 0;
+  const workers = Math.min(Math.max(1, concurrency), tasks.length);
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= tasks.length) return;
+      results[i] = await fn(tasks[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return results;
+}
+
+/**
+ * 淘宝侧：折淘客 search_result + api_all（等同联盟高佣商品库），不含京东。
+ * 说明：无法合法抓取 taobao.com 搜索页；此处按关键词走官方淘客数据通道，再用您的淘宝 PID 转链。
+ */
+/** 每「波」search_result 各 base×排序 拉取的页数；第 w 波对应联盟页 w*本值+1 … */
+const SEARCH_RESULT_PAGES_PER_WAVE = 5;
+
+async function searchTaobaoAffiliate(appkey, { keyword, minPrice, maxPrice, fetchWave = 0, pagedPull = false }) {
+  const wave = Math.max(0, parseInt(String(fetchWave), 10) || 0);
   const cid = getCidForApiAll(keyword);
   const lowerKw = (keyword || '').trim().toLowerCase();
   const hasKeyword = lowerKw && lowerKw !== '商品';
-  const needMorePages = isPhoneSearch(keyword);
+  const needMorePages = hasKeyword;
   const debug = process.env.DEBUG_SEARCH === '1' || process.env.DEBUG_SEARCH === 'true';
   let list = [];
 
+  const fetchConc = getSearchFetchConcurrency();
+  /** 服务端「每点下一页再拉一波」时用：每波只拉联盟侧下一页，避免一次吞多页再本地切片 */
+  const srPagesPerWave = pagedPull ? 1 : SEARCH_RESULT_PAGES_PER_WAVE;
+
   if (hasKeyword) {
     const promotionParams = getPromotionParams();
-    const searchResultPages = 6;
-    for (const base of [BASE_LINGQUAN, BASE_20000]) {
-      for (let page = 1; page <= searchResultPages; page++) {
-        try {
-          const raw = await request('/api/search_result.ashx', {
-            appkey, q: keyword, page, page_size: 50, ...promotionParams,
-          }, base);
-          if (!raw?.__html && raw?.status !== 301) {
-            const chunk = parseItemList(raw);
-            if (chunk.length) list = list.concat(chunk);
-            if (chunk.length < 50) break;
-          } else break;
-        } catch (_) { break; }
+    const srPageStart = wave * srPagesPerWave + 1;
+    const srPageEnd = (wave + 1) * srPagesPerWave;
+    const srTasks = [];
+    for (const sortMode of ['price_asc', 'price_desc']) {
+      for (const base of [BASE_LINGQUAN, BASE_20000]) {
+        for (let page = srPageStart; page <= srPageEnd; page++) {
+          srTasks.push({ sortMode, base, page });
+        }
       }
     }
-    if (debug) console.log('[search] after search_result: %d', list.length);
+    const srChunks = await runPool(srTasks, fetchConc, async ({ sortMode, base, page }) => {
+      try {
+        const raw = await request(
+          '/api/search_result.ashx',
+          {
+            appkey,
+            q: keyword,
+            page,
+            page_size: 50,
+            sort: sortMode,
+            ...promotionParams,
+          },
+          base
+        );
+        if (!raw?.__html && raw?.status !== 301) {
+          return parseItemList(raw).filter((r) => !isRawJdRow(r));
+        }
+      } catch (_) {}
+      return [];
+    });
+    for (const ch of srChunks) {
+      if (ch?.length) list = list.concat(ch);
+    }
+    if (debug) console.log('[search:tao] wave=%d after search_result: %d', wave, list.length);
   }
 
   try {
-    const pagesToFetch = needMorePages ? 8 : hasKeyword ? 6 : 1;
-    for (let p = 1; p <= pagesToFetch; p++) {
+    // 仅按低价分页会永远停在几元配件页，高价手机进不了池子；同时拉 price_desc 把高价位商品拉进来
+    const pagesPerSort = pagedPull ? 1 : needMorePages ? 6 : hasKeyword ? 5 : 1;
+    const aaPageStart = wave * pagesPerSort + 1;
+    const aaPageEnd = (wave + 1) * pagesPerSort;
+    const aaTasks = [];
+    for (const sortMode of ['price_asc', 'price_desc']) {
+      for (let p = aaPageStart; p <= aaPageEnd; p++) {
+        aaTasks.push({ sortMode, page: p });
+      }
+    }
+    const aaChunks = await runPool(aaTasks, fetchConc, async ({ sortMode, page: p }) => {
       let raw = await apiAll(appkey, {
         page: p,
         page_size: 50,
-        sort: 'price_asc',
+        sort: sortMode,
         cid: cid || undefined,
         q: hasKeyword ? keyword : undefined,
       });
-      if (raw && raw.__html && p === 1 && hasKeyword) {
+      // 20000 端口常对带 q 的翻页返回 301；领券站同路径 + pid 往往仍能拉一页
+      if (hasKeyword && raw && (raw.__html || raw.status === 301)) {
         try {
-          const fallback = await request('/api/api_all.ashx', {
-            appkey, page: 1, page_size: 50, sort: 'price_asc',
-            ...(cid ? { cid } : {}), q: keyword, ...getPromotionParams(),
-          }, BASE_LINGQUAN);
+          const fallback = await request(
+            '/api/api_all.ashx',
+            {
+              appkey,
+              page: p,
+              page_size: 50,
+              sort: sortMode,
+              ...(cid ? { cid } : {}),
+              q: keyword,
+              ...getPromotionParams(),
+            },
+            BASE_LINGQUAN
+          );
           if (!fallback?.__html && fallback?.status !== 301) raw = fallback;
         } catch (_) {}
       }
-      if (raw && raw.__html) {
-        if (debug) console.log('[search] api_all 第%d页返回 HTML，已 break', p);
-        break;
+      if (raw && (raw.__html || raw.status === 301)) {
+        if (debug) console.log('[search:tao] api_all sort=%s 第%d页 %s', sortMode, p, raw.__html ? 'HTML' : '301');
+        return [];
       }
-      const chunk = parseItemList(raw);
-      if (!chunk.length) {
-        if (debug) console.log('[search] api_all 第%d页 parseItemList 解析到 0 条', p);
-        break;
-      }
-      list = list.concat(chunk);
-      if (chunk.length < 50) break;
+      const chunk = parseItemList(raw).filter((r) => !isRawJdRow(r));
+      if (!chunk.length && debug) console.log('[search:tao] api_all sort=%s 第%d页 0 条', sortMode, p);
+      return chunk;
+    });
+    for (const chunk of aaChunks) {
+      if (chunk?.length) list = list.concat(chunk);
     }
-    if (debug) console.log('[search] after api_all: %d', list.length);
+    if (debug) console.log('[search:tao] wave=%d after api_all: %d', wave, list.length);
   } catch (e) {
     if (e.htmlContent) throw e;
-    if (debug) console.log('[search] api_all 异常:', e?.message?.slice(0, 60));
+    if (debug) console.log('[search:tao] api_all 异常:', e?.message?.slice(0, 60));
+    if (wave > 0) throw e;
     try {
       const type = getCategoryType(keyword);
       const fallbackPages = needMorePages ? 3 : 1;
@@ -502,7 +637,7 @@ async function searchProducts(appkey, { keyword, minPrice, maxPrice }) {
           err.htmlContent = raw.content;
           throw err;
         }
-        const chunk = parseItemList(raw);
+        const chunk = parseItemList(raw).filter((r) => !isRawJdRow(r));
         if (!chunk.length) break;
         list = list.concat(chunk);
         if (chunk.length < DEFAULT_PAGE_SIZE) break;
@@ -511,119 +646,164 @@ async function searchProducts(appkey, { keyword, minPrice, maxPrice }) {
       if (e2.htmlContent) throw e2;
       throw e;
     }
-    if (debug) console.log('[search] after 领券 fallback: %d', list.length);
+    if (debug) console.log('[search:tao] after 领券 fallback: %d', list.length);
   }
 
-  if (list.length === 0 && isPhoneSearch(keyword)) {
-    try {
-      const jdRaw = await callApi('jd_jingfen', { appkey, eliteId: '24', pageIndex: '1', pageSize: '50' });
-      if (!jdRaw?.__html) {
-        const code = jdRaw?.jd_union_open_goods_jingfen_query_response?.queryResult?.code;
-        if (code === '200' || code === 200) {
-          const jdList = parseItemList(jdRaw);
-          if (jdList.length) list = jdList;
-        }
+  list = dedupSearchList(list).filter((r) => !isRawJdRow(r));
+  if (debug) console.log('[search:tao] after dedup & 去京东: %d', list.length);
+
+  if (list.length === 0 && hasKeyword && wave === 0) {
+    const recTasks = [];
+    for (const sortMode of ['price_asc', 'price_desc']) {
+      for (const base of [BASE_LINGQUAN, BASE_20000]) {
+        recTasks.push({ sortMode, base });
       }
-    } catch (_) {}
-    if (debug) console.log('[search] after jd_jingfen(if): %d', list.length);
-  }
-
-  if (hasKeyword && list.length === 0) {
-    try {
-      for (let jdPage = 1; jdPage <= 5; jdPage++) {
-        const jdListRaw = await callApi('jd_goods_list', {
-          appkey, keyword, pageIndex: String(jdPage), pageSize: '50', sort: 'price_asc',
-        });
-        if (!jdListRaw?.__html && (jdListRaw?.status === 200 || jdListRaw?.content?.length)) {
-          const jdList = parseItemList(jdListRaw);
-          if (jdList.length) list = list.concat(jdList);
-          if (!jdList?.length || jdList.length < 50) break;
-        } else break;
-      }
-    } catch (_) {}
-    if (debug) console.log('[search] after jd_goods_list: %d', list.length);
-  }
-
-  const dedupById = (arr) => {
-    const seen = new Set();
-    return arr.filter((item) => {
-      const id = item.tao_id ?? item.skuId ?? item.item_id ?? item.goods_id ?? item.num_iid ?? item.id;
-      if (id == null || id === '') return true;
-      const sid = String(id);
-      if (seen.has(sid)) return false;
-      seen.add(sid);
-      return true;
-    });
-  };
-  list = dedupById(list);
-  if (debug) console.log('[search] after dedup: %d', list.length);
-
-  const isRawJd = (r) => {
-    const link = (r.item_url ?? r.url ?? r.materialUrl ?? '').toLowerCase();
-    const pic = (r.pict_url ?? r.pic_url ?? r.image ?? '').toLowerCase();
-    return link.includes('jd.com') || pic.includes('360buyimg');
-  };
-  const taobaoCount = list.filter((r) => !isRawJd(r)).length;
-  if (list.length > 0 && taobaoCount === 0 && hasKeyword) {
-    const params = {
-      appkey, page: 1, page_size: 50, sort: 'price_asc', q: keyword,
-      ...(cid ? { cid } : {}), ...getPromotionParams(),
-    };
-    for (const base of [BASE_LINGQUAN, BASE_20000]) {
+    }
+    const recChunks = await runPool(recTasks, fetchConc, async ({ sortMode, base }) => {
+      const params = {
+        appkey,
+        page: 1,
+        page_size: 50,
+        sort: sortMode,
+        q: keyword,
+        ...(cid ? { cid } : {}),
+        ...getPromotionParams(),
+      };
       try {
         const taoRaw = await request('/api/api_all.ashx', params, base);
         if (!taoRaw?.__html && taoRaw?.status !== 301) {
-          const chunk = parseItemList(taoRaw);
-          if (chunk.length) {
-            list = list.concat(chunk);
-            break;
-          }
+          return parseItemList(taoRaw).filter((r) => !isRawJdRow(r));
         }
       } catch (_) {}
+      return [];
+    });
+    for (const ch of recChunks) {
+      if (ch?.length) list = list.concat(ch);
     }
     try {
       const type = getCategoryType(keyword);
       for (let p = 1; p <= 2; p++) {
         const raw = await apiCategorySearch(appkey, type, p);
         if (!raw?.__html && raw?.status !== 301) {
-          const chunk = parseItemList(raw);
+          const chunk = parseItemList(raw).filter((r) => !isRawJdRow(r));
           if (chunk.length) list = list.concat(chunk);
           if (chunk.length < DEFAULT_PAGE_SIZE) break;
         } else break;
       }
     } catch (_) {}
-    list = dedupById(list);
-    if (debug) console.log('[search] after 补淘宝: %d', list.length);
+    list = dedupSearchList(list).filter((r) => !isRawJdRow(r));
+    if (debug) console.log('[search:tao] after 补淘宝: %d', list.length);
   }
 
   if (hasKeyword) {
     const before = list.length;
     list = list.filter((item) => itemMatchesKeyword(item, lowerKw));
-    if (debug) console.log('[search] after keyword filter: %d (was %d)', list.length, before);
-  }
-  if (isPhoneSearch(keyword)) {
-    const before = list.length;
-    list = list.filter((item) => !isPhoneAccessory(item));
-    const afterAccessory = list.length;
-    list = list.filter((item) => itemLooksLikePhone(item, keyword));
-    if (debug) console.log('[search] after phone filter (去配件+只留手机): %d (去配件后 %d, 原 %d)', list.length, afterAccessory, before);
+    if (debug) console.log('[search:tao] after keyword filter: %d (was %d)', list.length, before);
   }
 
   let items = list.map(normalizeItem);
   if (minPrice != null && minPrice > 0) items = items.filter((i) => i.price >= minPrice);
   if (maxPrice != null && maxPrice < 999999) items = items.filter((i) => i.price <= maxPrice);
-  if (debug) console.log('[search] after price filter: %d', items.length);
-  items.sort((a, b) => a.price - b.price);
+  if (debug) console.log('[search:tao] after price filter: %d', items.length);
+  // 展示顺序固定：参考价从低到高（同时拉 price_desc 只为把高价 SKU 拉进池子，不改变排序规则）
+  items.sort((a, b) => {
+    const pa = Number(a.price) || 0;
+    const pb = Number(b.price) || 0;
+    if (pa !== pb) return pa - pb;
+    return String(a.itemId ?? '').localeCompare(String(b.itemId ?? ''));
+  });
 
-  const taoInResult = items.filter((i) => i.source === '淘宝').length;
-  if (items.length > 0 && taoInResult === 0 && !searchProducts._noTaobaoWarned) {
-    searchProducts._noTaobaoWarned = true;
+  if (items.length === 0 && !searchTaobaoAffiliate._warned) {
+    searchTaobaoAffiliate._warned = true;
     console.warn(
-      '[搜索] 当前结果中无淘宝商品，可能原因：1) 折淘客 20000/领券站 返回登录页或未授权；2) 需在折淘客后台开通「全网超高佣」「领券站」并完成授权。设置 DEBUG_SEARCH=1 可查看各阶段条数。'
+      '[搜索:淘宝] 无结果时请检查：折淘客「领券站/超高佣」授权、ZHETAOKE_APPKEY、ZHETAOKE_TAOBAO_PID。DEBUG_SEARCH=1 可看各阶段条数。'
     );
   }
 
   return items;
+}
+
+/**
+ * 京东侧：折淘客 jd_goods_list（关键词）；再用京东联盟参数转链（折京客 PID）。
+ * 说明：无法合法抓取 jd.com 搜索页；此处为京东联盟商品数据通道。
+ */
+const JD_PAGES_PER_WAVE = 4;
+
+async function searchJdAffiliate(appkey, { keyword, minPrice, maxPrice, fetchWave = 0, pagedPull = false }) {
+  const wave = Math.max(0, parseInt(String(fetchWave), 10) || 0);
+  const lowerKw = (keyword || '').trim().toLowerCase();
+  const hasKeyword = lowerKw && lowerKw !== '商品';
+  const debug = process.env.DEBUG_SEARCH === '1' || process.env.DEBUG_SEARCH === 'true';
+  const fetchConc = getSearchFetchConcurrency();
+  let list = [];
+
+  const jdPagesPerWave = pagedPull ? 1 : JD_PAGES_PER_WAVE;
+
+  if (hasKeyword) {
+    try {
+      const jdPageStart = wave * jdPagesPerWave + 1;
+      const jdPageEnd = (wave + 1) * jdPagesPerWave;
+      const jdTasks = [];
+      for (const sortMode of ['price_asc', 'price_desc']) {
+        for (let jdPage = jdPageStart; jdPage <= jdPageEnd; jdPage++) {
+          jdTasks.push({ sortMode, jdPage });
+        }
+      }
+      const jdChunks = await runPool(jdTasks, fetchConc, async ({ sortMode, jdPage }) => {
+        try {
+          const jdListRaw = await callApi('jd_goods_list', {
+            appkey,
+            keyword,
+            pageIndex: String(jdPage),
+            pageSize: '50',
+            sort: sortMode,
+          });
+          if (!jdListRaw?.__html && (jdListRaw?.status === 200 || jdListRaw?.content?.length)) {
+            return parseItemList(jdListRaw);
+          }
+        } catch (_) {}
+        return [];
+      });
+      for (const jch of jdChunks) {
+        if (jch?.length) list = list.concat(jch);
+      }
+    } catch (_) {}
+    if (debug) console.log('[search:jd] wave=%d after jd_goods_list: %d', wave, list.length);
+  }
+
+  list = dedupSearchList(list);
+
+  if (hasKeyword) {
+    list = list.filter((item) => itemMatchesKeyword(item, lowerKw));
+  }
+
+  let items = list.map((raw) => {
+    const n = normalizeItem(raw);
+    return { ...n, source: '京东' };
+  });
+  if (minPrice != null && minPrice > 0) items = items.filter((i) => i.price >= minPrice);
+  if (maxPrice != null && maxPrice < 999999) items = items.filter((i) => i.price <= maxPrice);
+  items.sort((a, b) => {
+    const pa = Number(a.price) || 0;
+    const pb = Number(b.price) || 0;
+    if (pa !== pb) return pa - pb;
+    return String(a.itemId ?? '').localeCompare(String(b.itemId ?? ''));
+  });
+  return items;
+}
+
+/** 合并淘宝+京东（兼容旧调用）；界面推荐分别用 searchTaobaoAffiliate / searchJdAffiliate */
+async function searchProducts(appkey, opts) {
+  const [t, j] = await Promise.all([
+    searchTaobaoAffiliate(appkey, opts).catch(() => []),
+    searchJdAffiliate(appkey, opts).catch(() => []),
+  ]);
+  return [...t, ...j].sort((a, b) => {
+    const pa = Number(a.price) || 0;
+    const pb = Number(b.price) || 0;
+    if (pa !== pb) return pa - pb;
+    return String(a.itemId ?? '').localeCompare(String(b.itemId ?? ''));
+  });
 }
 
 /** 判断是否为京东商品（链接或来源含 jd） */
@@ -717,6 +897,8 @@ export {
   apiAll,
   apiConvertToAffiliate,
   searchProducts,
+  searchTaobaoAffiliate,
+  searchJdAffiliate,
   ensurePromotionLinks,
   getCategoryType,
   getCidForApiAll,
