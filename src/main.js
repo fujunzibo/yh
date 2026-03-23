@@ -113,10 +113,11 @@ function App() {
     if (mounted) updateDOM();
   }
 
-  function buildSearchBody(page, { resetSession = false } = {}) {
+  function buildSearchBody(page, { resetSession = false, nextPageIntent = false } = {}) {
     const kw = (keyword || '').trim();
     const body = { keyword: kw, page, pageSize: 20 };
     if (resetSession) body.resetSession = true;
+    if (nextPageIntent) body.nextPageIntent = true;
     const minStr = String(priceMin || '').trim();
     const maxStr = String(priceMax || '').trim();
     if (minStr !== '') {
@@ -135,7 +136,7 @@ function App() {
     return 1;
   }
 
-  async function doSearch(rawPage, { resetSession = false } = {}) {
+  async function doSearch(rawPage, { resetSession = false, nextPageIntent = false } = {}) {
     const page = resolveSearchPage(rawPage);
     const kw = (keyword || '').trim();
     if (!kw) return;
@@ -144,7 +145,7 @@ function App() {
       const res = await fetch(`${API_BASE}/api/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildSearchBody(page, { resetSession })),
+        body: JSON.stringify(buildSearchBody(page, { resetSession, nextPageIntent })),
       });
       const data = await res.json();
       setState({
@@ -210,7 +211,7 @@ function App() {
         const targetPage = loadingPage != null ? loadingPage : result?.page ?? 1;
         const msg =
           targetPage > 1
-            ? '正在加载下一页（必要时向联盟续拉并合并到当前结果）…'
+            ? '正在加载下一页（若需续拉联盟，本次最多合并一波新数据）…'
             : '正在搜索淘宝客与京东联盟商品…';
         msgEl.appendChild(createElement('div', { className: 'message' }, [msg]));
       }
@@ -336,7 +337,7 @@ function App() {
                 `第 ${result.page} / ${result.totalPages} 页 · 淘宝 ${result.taobaoTotal ?? 0} 条 · 京东 ${result.jdTotal ?? 0} 条`,
                 result.moreWavesAvailable
                   ? createElement('span', { className: 'pagination-waves-hint' }, [
-                      ' · 列表不够时会自动续拉联盟数据并合并',
+                      ' · 在最后一页点「下一页」时，若列表不够会续拉一波联盟数据',
                     ])
                   : null,
               ].filter(Boolean)),
@@ -345,7 +346,7 @@ function App() {
                 className: 'pagination-btn',
                 title: '翻到下一页；若当前合并列表不够该页，会自动向联盟再拉一批并合并',
                 disabled: loading || (result.page >= result.totalPages && !result.moreWavesAvailable),
-                onclick: () => doSearch(result.page + 1),
+                onclick: () => doSearch(result.page + 1, { nextPageIntent: true }),
               }, ['下一页']),
             ])
           );
@@ -360,7 +361,7 @@ function App() {
                 className: 'pagination-btn',
                 title: '继续拉取联盟数据并合并到当前搜索结果',
                 disabled: loading,
-                onclick: () => doSearch(result.totalPages + 1),
+                onclick: () => doSearch(result.totalPages + 1, { nextPageIntent: true }),
               }, ['下一页']),
             ])
           );

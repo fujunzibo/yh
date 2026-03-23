@@ -70,7 +70,7 @@ function pageShortfallHint(page, tLen, jLen, pageSize, fetchWaveMax, maxW) {
   if (hitWaveCap) {
     return `您请求的是第 ${page} 页，但去重后的结果只够展示 ${maxP} 页，且已达到 SEARCH_MAX_WAVES（${maxW} 波）上限。可在 .env 中增大 SEARCH_MAX_WAVES，或更换关键词 / 放宽价格区间后再搜。`;
   }
-  return `您请求的是第 ${page} 页，但去重后仍只够 ${maxP} 页（后续分页与已有列表重复较多）。界面将显示第 ${maxP} 页内容。`;
+  return `您请求的是第 ${page} 页，但当前合并列表只够 ${maxP} 页。请使用界面「下一页」逐页续拉联盟数据；直接跳转到较大页码不会自动多波拉取。`;
 }
 
 /**
@@ -119,31 +119,53 @@ async function extendSearchCacheOneWave(hit, APPKEY, keyword, minPrice, maxPrice
   };
 }
 
-/** 当前缓存条数不足以翻到 page 时，自动续拉下一波直至够页或达上限 */
-async function ensureCacheCoversPage(cacheKey, page, pageSize, APPKEY, keyword, minPrice, maxPrice) {
+/** 关键词搜索且已有结果时，认为仍可能受联盟「单次/单波」条数限制，可通过「下一页」续拉 */
+function initialMayNeedMoreWaves(taoLen, jdLen, keyword) {
+  const kw = String(keyword || '').trim();
+  return kw.length > 0 && taoLen + jdLen > 0;
+}
+
+function computeMoreWavesAvailable(hit) {
+  if (!hit || hit.mayNeedMoreWaves === false) return false;
+  const maxW = getSearchMaxWaves();
+  return (hit.fetchWaveMax ?? 0) + 1 < maxW;
+}
+
+/**
+ * 仅在客户端声明「下一页」意图时，若当前合并列表不足以显示目标页，且仍可能还有联盟分页，则续拉「一波」并合并（每次请求最多一波）。
+ */
+async function maybeExtendOneWaveOnNextPage(
+  cacheKey,
+  page,
+  pageSize,
+  APPKEY,
+  keyword,
+  minPrice,
+  maxPrice,
+  nextPageIntent
+) {
+  if (!nextPageIntent) return { newTaobaoCount: 0, newJdCount: 0 };
   let cur = searchCache.get(cacheKey);
   if (!cur) return { newTaobaoCount: 0, newJdCount: 0 };
+  if (cur.mayNeedMoreWaves === false) return { newTaobaoCount: 0, newJdCount: 0 };
+  const tLen = (cur.taobaoItems ?? []).length;
+  const jLen = (cur.jdItems ?? []).length;
+  const maxP = dualMaxPages(tLen, jLen, pageSize);
+  if (page <= maxP) return { newTaobaoCount: 0, newJdCount: 0 };
   const maxW = getSearchMaxWaves();
-  let sumNT = 0;
-  let sumNJ = 0;
-  const maxRounds = Math.max(24, maxW + 8);
-  for (let guard = 0; guard < maxRounds; guard++) {
-    const tLen = (cur.taobaoItems ?? []).length;
-    const jLen = (cur.jdItems ?? []).length;
-    const maxP = dualMaxPages(tLen, jLen, pageSize);
-    if (page <= maxP) break;
-    if ((cur.fetchWaveMax ?? 0) + 1 >= maxW) break;
-    const r = await extendSearchCacheOneWave(cur, APPKEY, keyword, minPrice, maxPrice);
-    if (r.htmlError) {
-      console.warn('自动拉取下一页数据时折淘客返回网页，已停止继续拉取');
-      break;
-    }
-    cur = r.hit;
-    searchCache.set(cacheKey, cur);
-    sumNT += r.newTaobaoCount;
-    sumNJ += r.newJdCount;
+  if ((cur.fetchWaveMax ?? 0) + 1 >= maxW) return { newTaobaoCount: 0, newJdCount: 0 };
+  const r = await extendSearchCacheOneWave(cur, APPKEY, keyword, minPrice, maxPrice);
+  if (r.htmlError) {
+    console.warn('点击下一页续拉时折淘客返回网页，已停止本波');
+    return { newTaobaoCount: 0, newJdCount: 0 };
   }
-  return { newTaobaoCount: sumNT, newJdCount: sumNJ };
+  cur = r.hit;
+  if (r.newTaobaoCount + r.newJdCount === 0) {
+    cur.mayNeedMoreWaves = false;
+  }
+  cur.ts = Date.now();
+  searchCache.set(cacheKey, cur);
+  return { newTaobaoCount: r.newTaobaoCount, newJdCount: r.newJdCount };
 }
 
 function getSearchCacheKey(parsed) {
@@ -185,7 +207,7 @@ function resolveSearchParams(body) {
 }
 
 const FLOW_NOTE =
-  '说明：无法在服务端合法抓取淘宝/京东搜索页 HTML。本应用通过折淘客对接的淘宝客高佣商品库（search_result、api_all）与京东联盟商品接口（jd_goods_list 等）按关键词返回可推广商品，再分别用您在 .env 中的 ZHETAOKE_TAOBAO_PID（淘宝客 PID）与 ZHETAOKE_JD_PID / unionId（京东推广位）生成推广链接。分页规则：先将多路联盟结果合并去重为两列总列表，再按页切片展示；当前列表不够翻页时自动续拉下一波并合并（SEARCH_MAX_WAVES）。下方「去淘宝搜 / 去京东搜」对应官网关键词搜索页，便于对照。';
+  '说明：无法在服务端合法抓取淘宝/京东搜索页 HTML。本应用通过折淘客对接的淘宝客高佣商品库（search_result、api_all）与京东联盟商品接口（jd_goods_list 等）按关键词返回可推广商品，再分别用您在 .env 中的 ZHETAOKE_TAOBAO_PID（淘宝客 PID）与 ZHETAOKE_JD_PID / unionId（京东推广位）生成推广链接。分页规则：多路结果合并去重后按页切片；仅在仍有联盟分页潜力时，通过点击「下一页」且当前列表不足以显示下一页时，每次最多续拉一波并合并（SEARCH_MAX_WAVES），不会在后台为跳页自动连拉多波。下方「去淘宝搜 / 去京东搜」对应官网关键词搜索页，便于对照。';
 
 function sliceChannel(items, page, pageSize) {
   const total = items.length;
@@ -306,9 +328,28 @@ app.post('/api/search', async (req, res) => {
   const cacheHit = cached && now - cached.ts < SEARCH_CACHE_TTL_MS && !resetSession;
 
   const maxW = getSearchMaxWaves();
+  const nextPageIntent = body.nextPageIntent === true;
 
   if (cacheHit) {
-    const extra = await ensureCacheCoversPage(cacheKey, page, pageSize, APPKEY, keyword, minPrice, maxPrice);
+    let freshPre = searchCache.get(cacheKey) ?? cached;
+    if (freshPre.mayNeedMoreWaves === undefined) {
+      freshPre.mayNeedMoreWaves = initialMayNeedMoreWaves(
+        (freshPre.taobaoItems ?? []).length,
+        (freshPre.jdItems ?? []).length,
+        keyword
+      );
+      searchCache.set(cacheKey, freshPre);
+    }
+    const extra = await maybeExtendOneWaveOnNextPage(
+      cacheKey,
+      page,
+      pageSize,
+      APPKEY,
+      keyword,
+      minPrice,
+      maxPrice,
+      nextPageIntent
+    );
     const fresh = searchCache.get(cacheKey) ?? cached;
     const taobaoItems = fresh.taobaoItems ?? fresh.items?.filter((i) => i.source === '淘宝') ?? [];
     const jdItems = fresh.jdItems ?? fresh.items?.filter((i) => i.source === '京东') ?? [];
@@ -325,6 +366,7 @@ app.post('/api/search', async (req, res) => {
         ...baseExtras,
         fetchedAt: fresh.ts,
         fetchWaveMax: fresh.fetchWaveMax ?? 0,
+        moreWavesAvailable: computeMoreWavesAvailable(fresh),
         ...(extra.newTaobaoCount || extra.newJdCount
           ? { newTaobaoCount: extra.newTaobaoCount, newJdCount: extra.newJdCount }
           : {}),
@@ -386,15 +428,27 @@ app.post('/api/search', async (req, res) => {
   }
 
   const fetchedAt = Date.now();
+  const tLen = taobaoItems.length;
+  const jLen = jdItems.length;
   searchCache.set(cacheKey, {
     taobaoItems,
     jdItems,
     parsed,
     ts: fetchedAt,
     fetchWaveMax: 0,
+    mayNeedMoreWaves: initialMayNeedMoreWaves(tLen, jLen, keyword),
   });
 
-  const extra = await ensureCacheCoversPage(cacheKey, page, pageSize, APPKEY, keyword, minPrice, maxPrice);
+  const extra = await maybeExtendOneWaveOnNextPage(
+    cacheKey,
+    page,
+    pageSize,
+    APPKEY,
+    keyword,
+    minPrice,
+    maxPrice,
+    nextPageIntent
+  );
   const out = searchCache.get(cacheKey);
   const tOut = out.taobaoItems ?? [];
   const jOut = out.jdItems ?? [];
@@ -413,6 +467,7 @@ app.post('/api/search', async (req, res) => {
       ...baseExtras,
       fetchedAt: out.ts,
       fetchWaveMax: out.fetchWaveMax ?? 0,
+      moreWavesAvailable: computeMoreWavesAvailable(out),
       ...(extra.newTaobaoCount || extra.newJdCount
         ? { newTaobaoCount: extra.newTaobaoCount, newJdCount: extra.newJdCount }
         : {}),
