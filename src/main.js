@@ -93,6 +93,14 @@ function renderItemCard(it) {
   ].filter(Boolean));
 }
 
+const CHANNELS = [
+  { key: 'taobao', title: '淘宝客（折淘客 PID 转链）', source: '淘宝', listKey: 'taobaoItems', totalKey: 'taobaoTotal', retailUrlKey: 'taobaoRetailSearchUrl', pidLabel: 'ZHETAOKE_TAOBAO_PID' },
+  { key: 'jd', title: '京东联盟（折京客 / 京东 PID 转链）', source: '京东', listKey: 'jdItems', totalKey: 'jdTotal', retailUrlKey: 'jdRetailSearchUrl', pidLabel: 'ZHETAOKE_JD_PID / unionId' },
+  { key: 'douyin', title: '抖音联盟（关键词推广商品）', source: '抖音', listKey: 'douyinItems', totalKey: 'douyinTotal', retailUrlKey: 'douyinRetailSearchUrl', pidLabel: '抖音联盟参数（按后台授权）' },
+  { key: 'vip', title: '唯品会联盟（关键词推广商品）', source: '唯品会', listKey: 'vipItems', totalKey: 'vipTotal', retailUrlKey: 'vipRetailSearchUrl', pidLabel: '唯品会联盟授权参数' },
+  { key: 'pdd', title: '拼多多联盟（多多进宝）', source: '拼多多', listKey: 'pddItems', totalKey: 'pddTotal', retailUrlKey: 'pddRetailSearchUrl', pidLabel: '拼多多联盟参数（按后台授权）' },
+];
+
 function App() {
   let keyword = '';
   let priceMin = '';
@@ -147,7 +155,18 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildSearchBody(page, { resetSession, nextPageIntent })),
       });
-      const data = await res.json();
+      const rawText = await res.text();
+      let data = null;
+      try {
+        data = rawText ? JSON.parse(rawText) : null;
+      } catch (_) {
+        data = null;
+      }
+      if (!data || typeof data !== 'object') {
+        throw new Error(
+          '后端未返回有效 JSON（通常是 server 未启动或已崩溃）。请先运行 npm run server，再重试。'
+        );
+      }
       setState({
         result: {
           error: data.error || null,
@@ -171,6 +190,16 @@ function App() {
           flowNote: data.flowNote || null,
           taobaoRetailSearchUrl: data.taobaoRetailSearchUrl || null,
           jdRetailSearchUrl: data.jdRetailSearchUrl || null,
+          douyinItems: data.douyinItems || [],
+          vipItems: data.vipItems || [],
+          pddItems: data.pddItems || [],
+          douyinTotal: data.douyinTotal ?? 0,
+          vipTotal: data.vipTotal ?? 0,
+          pddTotal: data.pddTotal ?? 0,
+          douyinRetailSearchUrl: data.douyinRetailSearchUrl || null,
+          vipRetailSearchUrl: data.vipRetailSearchUrl || null,
+          pddRetailSearchUrl: data.pddRetailSearchUrl || null,
+          channelHints: data.channelHints || [],
           moreWavesAvailable: data.moreWavesAvailable !== false,
           newTaobaoCount: data.newTaobaoCount,
           newJdCount: data.newJdCount,
@@ -240,10 +269,17 @@ function App() {
       if (result?.flowNote) {
         listEl.appendChild(createElement('div', { className: 'flow-note' }, [result.flowNote]));
       }
+      if (result?.channelHints?.length) {
+        listEl.appendChild(
+          createElement(
+            'div',
+            { className: 'flow-note' },
+            [createElement('strong', {}, ['渠道诊断：']), ' ', result.channelHints.join(' ')]
+          )
+        );
+      }
 
-      const hasTaobao = result?.taobaoItems?.length > 0;
-      const hasJd = result?.jdItems?.length > 0;
-      const hasAnyItems = hasTaobao || hasJd;
+      const hasAnyItems = CHANNELS.some((c) => (result?.[c.listKey] || []).length > 0);
       /** 已有多页或当前不在第 1 页时，即使本屏无商品也要保留分页，否则会整页空白且无法返回 */
       const keepNavShell =
         result &&
@@ -267,51 +303,32 @@ function App() {
             );
           }
 
-          const taoHeader = createElement('div', { className: 'channel-header' }, [
-            createElement('h2', { className: 'channel-title' }, ['一、淘宝客（折淘客 PID 转链）']),
-            createElement('p', { className: 'channel-sub' }, [
-              '关键词已在淘宝客高佣库中匹配；推广链接含您的 ',
-              createElement('strong', {}, ['ZHETAOKE_TAOBAO_PID']),
-              `。本列共 ${result.taobaoTotal ?? 0} 条，本页展示 ${result.taobaoItems.length} 条。`,
-            ]),
-            result.taobaoRetailSearchUrl
-              ? createElement('a', {
-                className: 'channel-retail-link',
-                href: result.taobaoRetailSearchUrl,
-                target: '_blank',
-                rel: 'noopener noreferrer',
-              }, ['打开淘宝官网搜索对照 →'])
-              : null,
-          ].filter(Boolean));
-
-          const jdHeader = createElement('div', { className: 'channel-header' }, [
-            createElement('h2', { className: 'channel-title' }, ['二、京东联盟（折京客 / 京东 PID 转链）']),
-            createElement('p', { className: 'channel-sub' }, [
-              '关键词已在京东联盟推广商品中匹配；推广链接含您的 ',
-              createElement('strong', {}, ['ZHETAOKE_JD_PID / unionId']),
-              `。本列共 ${result.jdTotal ?? 0} 条，本页展示 ${result.jdItems.length} 条。`,
-            ]),
-            result.jdRetailSearchUrl
-              ? createElement('a', {
-                className: 'channel-retail-link',
-                href: result.jdRetailSearchUrl,
-                target: '_blank',
-                rel: 'noopener noreferrer',
-              }, ['打开京东官网搜索对照 →'])
-              : null,
-          ].filter(Boolean));
-
-          const taoBlock = createElement('section', { className: 'channel-block' }, [
-            taoHeader,
-            createElement('div', { className: 'results' }, (result.taobaoItems || []).map(renderItemCard)),
-          ]);
-          const jdBlock = createElement('section', { className: 'channel-block' }, [
-            jdHeader,
-            createElement('div', { className: 'results' }, (result.jdItems || []).map(renderItemCard)),
-          ]);
-
-          wrap.appendChild(taoBlock);
-          wrap.appendChild(jdBlock);
+          CHANNELS.forEach((ch, idx) => {
+            const items = result?.[ch.listKey] || [];
+            const total = result?.[ch.totalKey] ?? 0;
+            const retailUrl = result?.[ch.retailUrlKey] || null;
+            const header = createElement('div', { className: 'channel-header' }, [
+              createElement('h2', { className: 'channel-title' }, [`${idx + 1}、${ch.title}`]),
+              createElement('p', { className: 'channel-sub' }, [
+                '关键词已在该平台联盟推广商品中匹配；可用参数 ',
+                createElement('strong', {}, [ch.pidLabel]),
+                `。本列共 ${total} 条，本页展示 ${items.length} 条。`,
+              ]),
+              retailUrl
+                ? createElement('a', {
+                  className: 'channel-retail-link',
+                  href: retailUrl,
+                  target: '_blank',
+                  rel: 'noopener noreferrer',
+                }, [`打开${ch.source}官网搜索对照 →`])
+                : null,
+            ].filter(Boolean));
+            const block = createElement('section', { className: 'channel-block' }, [
+              header,
+              createElement('div', { className: 'results' }, items.map(renderItemCard)),
+            ]);
+            wrap.appendChild(block);
+          });
           listEl.appendChild(wrap);
         } else {
           listEl.appendChild(
@@ -334,7 +351,7 @@ function App() {
                 onclick: () => doSearch(result.page - 1),
               }, ['上一页']),
               createElement('span', { className: 'pagination-info' }, [
-                `第 ${result.page} / ${result.totalPages} 页 · 淘宝 ${result.taobaoTotal ?? 0} 条 · 京东 ${result.jdTotal ?? 0} 条`,
+                `第 ${result.page} / ${result.totalPages} 页 · 淘宝 ${result.taobaoTotal ?? 0} · 京东 ${result.jdTotal ?? 0} · 抖音 ${result.douyinTotal ?? 0} · 唯品会 ${result.vipTotal ?? 0} · 拼多多 ${result.pddTotal ?? 0}`,
                 result.moreWavesAvailable
                   ? createElement('span', { className: 'pagination-waves-hint' }, [
                       ' · 在最后一页点「下一页」时，若列表不够会续拉一波联盟数据',

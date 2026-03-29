@@ -1,11 +1,11 @@
 {
   "name": "discount-shopping-app",
   "version": "1.0.0",
-  "description": "优惠购物 App - 通过折淘客 API 获取淘宝/京东/拼多多优惠信息",
+  "description": "\u4f18\u60e0\u8d2d\u7269 App - \u901a\u8fc7\u6298\u6dd8\u5ba2 API \u83b7\u53d6\u6dd8\u5b9d/\u4eac\u4e1c/\u62fc\u591a\u591a\u4f18\u60e0\u4fe1\u606f",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "node init && vite",
+    "build": "node init && vite build",
     "preview": "vite preview",
     "server": "node server/index.js"
   },

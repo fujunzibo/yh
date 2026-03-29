@@ -6,8 +6,14 @@ import { parseSearchIntent } from './parseQuery.js';
 import {
   searchTaobaoAffiliate,
   searchJdAffiliate,
+  searchDouyinAffiliate,
+  searchVipAffiliate,
+  searchPddAffiliate,
   ensurePromotionLinks,
   stableItemIdFromRow,
+  request,
+  callApi,
+  parseItemList,
 } from './zhetaoke.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -172,6 +178,21 @@ function getSearchCacheKey(parsed) {
   return JSON.stringify({ keyword: parsed.keyword, minPrice: parsed.minPrice, maxPrice: parsed.maxPrice });
 }
 
+function buildChannelHints() {
+  const hints = [];
+  if (!process.env.ZHETAOKE_TAOBAO_PID) {
+    hints.push('淘宝：未配置 ZHETAOKE_TAOBAO_PID，可能只能看到原链或转链失败。');
+  }
+  if (!process.env.ZHETAOKE_JD_UNION_ID && !process.env.ZHETAOKE_JD_PID) {
+    hints.push('京东：缺少 ZHETAOKE_JD_UNION_ID / ZHETAOKE_JD_PID，京东联盟接口常返回空。');
+  }
+  if (!process.env.ZHETAOKE_JD_APP_KEY || !process.env.ZHETAOKE_JD_APP_SECRET) {
+    hints.push('京东：未配置 ZHETAOKE_JD_APP_KEY / ZHETAOKE_JD_APP_SECRET，部分接口可能不可用。');
+  }
+  hints.push('抖音/唯品会/拼多多：通常需在折淘客后台分别开通并授权对应联盟能力，否则会返回空列表。');
+  return hints;
+}
+
 const DEFAULT_PRICE_MIN = 0;
 const DEFAULT_PRICE_MAX = 999999;
 
@@ -207,7 +228,7 @@ function resolveSearchParams(body) {
 }
 
 const FLOW_NOTE =
-  '说明：无法在服务端合法抓取淘宝/京东搜索页 HTML。本应用通过折淘客对接的淘宝客高佣商品库（search_result、api_all）与京东联盟商品接口（jd_goods_list 等）按关键词返回可推广商品，再分别用您在 .env 中的 ZHETAOKE_TAOBAO_PID（淘宝客 PID）与 ZHETAOKE_JD_PID / unionId（京东推广位）生成推广链接。分页规则：多路结果合并去重后按页切片；仅在仍有联盟分页潜力时，通过点击「下一页」且当前列表不足以显示下一页时，每次最多续拉一波并合并（SEARCH_MAX_WAVES），不会在后台为跳页自动连拉多波。下方「去淘宝搜 / 去京东搜」对应官网关键词搜索页，便于对照。';
+  '说明：无法在服务端合法抓取各电商官网搜索页 HTML。本应用通过折淘客对接的淘宝客、京东联盟、抖音、唯品会、拼多多接口按关键词返回可推广商品，并对可转链渠道生成推广链接。分页规则：主增量续拉仍优先淘宝/京东；其余渠道按已返回结果切片展示。下方平台搜索链接用于官网对照。';
 
 function sliceChannel(items, page, pageSize) {
   const total = items.length;
@@ -222,10 +243,13 @@ function sliceChannel(items, page, pageSize) {
   };
 }
 
-function jsonSearchOk(parsed, taobaoItems, jdItems, page, pageSize, extras = {}) {
+function jsonSearchOk(parsed, taobaoItems, jdItems, douyinItems, vipItems, pddItems, page, pageSize, extras = {}) {
   const t = sliceChannel(taobaoItems, page, pageSize);
   const j = sliceChannel(jdItems, page, pageSize);
-  const maxPages = Math.max(t.totalPages, j.totalPages);
+  const d = sliceChannel(douyinItems, page, pageSize);
+  const v = sliceChannel(vipItems, page, pageSize);
+  const p = sliceChannel(pddItems, page, pageSize);
+  const maxPages = Math.max(t.totalPages, j.totalPages, d.totalPages, v.totalPages, p.totalPages);
   const maxW = getSearchMaxWaves();
   const fMax = Number.isFinite(Number(extras.fetchWaveMax)) ? Number(extras.fetchWaveMax) : 0;
   const moreWaves =
@@ -238,15 +262,24 @@ function jsonSearchOk(parsed, taobaoItems, jdItems, page, pageSize, extras = {})
     parsed,
     taobaoItems: t.slice,
     jdItems: j.slice,
+    douyinItems: d.slice,
+    vipItems: v.slice,
+    pddItems: p.slice,
     taobaoTotal: t.total,
     jdTotal: j.total,
+    douyinTotal: d.total,
+    vipTotal: v.total,
+    pddTotal: p.total,
     taobaoTotalPages: t.totalPages,
     jdTotalPages: j.totalPages,
+    douyinTotalPages: d.totalPages,
+    vipTotalPages: v.totalPages,
+    pddTotalPages: p.totalPages,
     page: Math.min(page, maxPages),
     pageSize,
     totalPages: maxPages,
-    items: [...t.slice, ...j.slice],
-    total: t.total + j.total,
+    items: [...t.slice, ...j.slice, ...d.slice, ...v.slice, ...p.slice],
+    total: t.total + j.total + d.total + v.total + p.total,
     moreWavesAvailable: moreWaves,
     wavesLoaded: fMax + 1,
     ...clientExtras,
@@ -255,6 +288,100 @@ function jsonSearchOk(parsed, taobaoItems, jdItems, page, pageSize, extras = {})
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'dist')));
+
+function missingEnvList() {
+  return {
+    appkey: !process.env.ZHETAOKE_APPKEY,
+    taobaoPid: !process.env.ZHETAOKE_TAOBAO_PID,
+    jdUnionId: !process.env.ZHETAOKE_JD_UNION_ID,
+    jdPid: !process.env.ZHETAOKE_JD_PID,
+    jdAppKey: !process.env.ZHETAOKE_JD_APP_KEY,
+    jdAppSecret: !process.env.ZHETAOKE_JD_APP_SECRET,
+  };
+}
+
+function summarizeRaw(raw) {
+  if (!raw) return { kind: 'empty', status: null, count: 0 };
+  if (raw.__html) return { kind: 'html', status: raw.status ?? null, count: 0 };
+  const count = Array.isArray(raw) ? raw.length : parseItemList(raw).length;
+  return { kind: 'json', status: raw.status ?? null, count };
+}
+
+async function runProbe(name, fn) {
+  try {
+    const raw = await fn();
+    return { channel: name, ok: true, ...summarizeRaw(raw), error: '' };
+  } catch (e) {
+    return {
+      channel: name,
+      ok: false,
+      kind: 'error',
+      status: null,
+      count: 0,
+      error: e?.message || 'unknown error',
+    };
+  }
+}
+
+app.get('/api/health/channels', async (req, res) => {
+  const keyword = String(req.query?.keyword || '手机').trim() || '手机';
+  const appkey = APPKEY;
+  const envMissing = missingEnvList();
+
+  if (!appkey) {
+    return res.json({
+      ok: false,
+      keyword,
+      envMissing,
+      error: '未配置 ZHETAOKE_APPKEY',
+      probes: [],
+    });
+  }
+
+  const probes = await Promise.all([
+    runProbe('taobao_search_result_lingquan', () =>
+      request(`https://www.zhetaoke.com/api/search_result.ashx`, {
+        appkey,
+        q: keyword,
+        page: 1,
+        page_size: 20,
+      }, '')
+    ),
+    runProbe('taobao_search_result_20000', () =>
+      request(`http://api.zhetaoke.com:20000/api/search_result.ashx`, {
+        appkey,
+        q: keyword,
+        page: 1,
+        page_size: 20,
+      }, '')
+    ),
+    runProbe('jd_goods_list', () =>
+      callApi('jd_goods_list', { appkey, keyword, pageIndex: '1', pageSize: '20', sort: 'price_asc' })
+    ),
+    // 京粉精选：搜索侧无「火爆列表」数据时常靠此兜底；与 jd_goods_list 返回结构不同
+    runProbe('jd_jingfen_elite24', () =>
+      callApi('jd_jingfen', { appkey, eliteId: '24', pageIndex: '1', pageSize: '20' })
+    ),
+    runProbe('douyin_product_search', () =>
+      callApi('douyin_product_search', { appkey, keyword, page: '1', page_size: '20' })
+    ),
+    runProbe('vip_query', () =>
+      callApi('vip_query', { appkey, keyword, page: '1', pageSize: '20' })
+    ),
+    runProbe('pdd_goods_search', () =>
+      callApi('pdd_goods_search', { appkey, keyword, page: '1', page_size: '20' })
+    ),
+  ]);
+
+  res.json({
+    ok: true,
+    keyword,
+    envMissing,
+    probes,
+    hint:
+      'kind=html 多为未授权/登录态问题；kind=json 且 count=0 多为权限未开通、参数不匹配或该关键词无佣金商品；kind=error 多为接口不可用或网络问题。京东：jd_goods_list 为 301 时若 jd_jingfen_elite24 有 count，搜索仍可能通过京粉兜底出结果。',
+  });
+});
 
 /**
  * POST /api/search
@@ -283,13 +410,18 @@ app.post('/api/search', async (req, res) => {
   const enc = encodeURIComponent;
   const taobaoRetailSearchUrl = `https://s.taobao.com/search?q=${enc(keyword)}`;
   const jdRetailSearchUrl = `https://search.jd.com/Search?keyword=${enc(keyword)}&enc=utf-8`;
+  const douyinRetailSearchUrl = `https://www.douyin.com/search/${enc(keyword)}`;
+  const vipRetailSearchUrl = `https://category.vip.com/suggest.php?keyword=${enc(keyword)}`;
+  const pddRetailSearchUrl = `https://mobile.yangkeduo.com/search_result.html?search_key=${enc(keyword)}`;
   const fallbackLinks = [
     { name: '去淘宝搜', url: taobaoRetailSearchUrl },
     { name: '去京东搜', url: jdRetailSearchUrl },
-    { name: '拼多多搜索', url: `https://mobile.yangkeduo.com/search_result.html?search_key=${enc(keyword)}` },
+    { name: '去抖音搜', url: douyinRetailSearchUrl },
+    { name: '去唯品会搜', url: vipRetailSearchUrl },
+    { name: '去拼多多搜', url: pddRetailSearchUrl },
   ];
   const zhetaokeSearchUrl = `https://www.zhetaoke.com/list/index.html?q=${enc(keyword)}`;
-  const dataSource = '折淘客（淘宝客 + 京东联盟）';
+  const dataSource = '折淘客（淘宝客 + 京东 + 抖音 + 唯品会 + 拼多多）';
   const quoteNote = '价格为参考价，以下单页为准；佣金以联盟后台结算为准';
 
   const baseExtras = {
@@ -300,6 +432,10 @@ app.post('/api/search', async (req, res) => {
     flowNote: FLOW_NOTE,
     taobaoRetailSearchUrl,
     jdRetailSearchUrl,
+    douyinRetailSearchUrl,
+    vipRetailSearchUrl,
+    pddRetailSearchUrl,
+    channelHints: buildChannelHints(),
   };
 
   if (!APPKEY) {
@@ -309,11 +445,20 @@ app.post('/api/search', async (req, res) => {
       parsed,
       taobaoItems: [],
       jdItems: [],
+      douyinItems: [],
+      vipItems: [],
+      pddItems: [],
       items: [],
       taobaoTotal: 0,
       jdTotal: 0,
+      douyinTotal: 0,
+      vipTotal: 0,
+      pddTotal: 0,
       taobaoTotalPages: 1,
       jdTotalPages: 1,
+      douyinTotalPages: 1,
+      vipTotalPages: 1,
+      pddTotalPages: 1,
       total: 0,
       page: 1,
       pageSize,
@@ -353,6 +498,9 @@ app.post('/api/search', async (req, res) => {
     const fresh = searchCache.get(cacheKey) ?? cached;
     const taobaoItems = fresh.taobaoItems ?? fresh.items?.filter((i) => i.source === '淘宝') ?? [];
     const jdItems = fresh.jdItems ?? fresh.items?.filter((i) => i.source === '京东') ?? [];
+    const douyinItems = fresh.douyinItems ?? fresh.items?.filter((i) => i.source === '抖音') ?? [];
+    const vipItems = fresh.vipItems ?? fresh.items?.filter((i) => i.source === '唯品会') ?? [];
+    const pddItems = fresh.pddItems ?? fresh.items?.filter((i) => i.source === '拼多多') ?? [];
     const shortHint = pageShortfallHint(
       page,
       taobaoItems.length,
@@ -362,7 +510,7 @@ app.post('/api/search', async (req, res) => {
       maxW
     );
     return res.json(
-      jsonSearchOk(parsed, taobaoItems, jdItems, page, pageSize, {
+      jsonSearchOk(parsed, taobaoItems, jdItems, douyinItems, vipItems, pddItems, page, pageSize, {
         ...baseExtras,
         fetchedAt: fresh.ts,
         fetchWaveMax: fresh.fetchWaveMax ?? 0,
@@ -378,6 +526,9 @@ app.post('/api/search', async (req, res) => {
   const opts = { keyword, minPrice, maxPrice };
   let taobaoItems = [];
   let jdItems = [];
+  let douyinItems = [];
+  let vipItems = [];
+  let pddItems = [];
   let htmlError = null;
 
   try {
@@ -392,25 +543,49 @@ app.post('/api/search', async (req, res) => {
   } catch (e) {
     console.warn('京东渠道搜索异常:', e.message);
   }
+  try {
+    douyinItems = await searchDouyinAffiliate(APPKEY, opts);
+  } catch (e) {
+    console.warn('抖音渠道搜索异常:', e.message);
+  }
+  try {
+    vipItems = await searchVipAffiliate(APPKEY, opts);
+  } catch (e) {
+    console.warn('唯品会渠道搜索异常:', e.message);
+  }
+  try {
+    pddItems = await searchPddAffiliate(APPKEY, opts);
+  } catch (e) {
+    console.warn('拼多多渠道搜索异常:', e.message);
+  }
 
-  if (htmlError && taobaoItems.length === 0 && jdItems.length === 0) {
+  if (htmlError && taobaoItems.length === 0 && jdItems.length === 0 && douyinItems.length === 0 && vipItems.length === 0 && pddItems.length === 0) {
     console.warn('Zhetaoke 返回网页:', htmlError.message);
     return res.json({
       ok: true,
       parsed,
       taobaoItems: [],
       jdItems: [],
+      douyinItems: [],
+      vipItems: [],
+      pddItems: [],
       items: [],
       taobaoTotal: 0,
       jdTotal: 0,
+      douyinTotal: 0,
+      vipTotal: 0,
+      pddTotal: 0,
       taobaoTotalPages: 1,
       jdTotalPages: 1,
+      douyinTotalPages: 1,
+      vipTotalPages: 1,
+      pddTotalPages: 1,
       total: 0,
       page: 1,
       pageSize,
       totalPages: 1,
       apiHint:
-        '折淘客接口返回了网页（多为未授权/appkey 问题），淘宝与京东列表均为空。请检查后台授权与 .env 中的 ZHETAOKE_APPKEY、京东 unionId/PID。',
+        '折淘客接口返回了网页（多为未授权/appkey 问题），多平台列表均为空。请检查后台授权与 .env 中的 ZHETAOKE_APPKEY 及各平台联盟参数。',
       ...baseExtras,
       fetchedAt: Date.now(),
     });
@@ -426,6 +601,21 @@ app.post('/api/search', async (req, res) => {
   } catch (e) {
     console.warn('京东转链批量异常:', e.message);
   }
+  try {
+    douyinItems = await ensurePromotionLinks(APPKEY, douyinItems);
+  } catch (e) {
+    console.warn('抖音转链批量异常:', e.message);
+  }
+  try {
+    vipItems = await ensurePromotionLinks(APPKEY, vipItems);
+  } catch (e) {
+    console.warn('唯品会转链批量异常:', e.message);
+  }
+  try {
+    pddItems = await ensurePromotionLinks(APPKEY, pddItems);
+  } catch (e) {
+    console.warn('拼多多转链批量异常:', e.message);
+  }
 
   const fetchedAt = Date.now();
   const tLen = taobaoItems.length;
@@ -433,6 +623,9 @@ app.post('/api/search', async (req, res) => {
   searchCache.set(cacheKey, {
     taobaoItems,
     jdItems,
+    douyinItems,
+    vipItems,
+    pddItems,
     parsed,
     ts: fetchedAt,
     fetchWaveMax: 0,
@@ -452,6 +645,9 @@ app.post('/api/search', async (req, res) => {
   const out = searchCache.get(cacheKey);
   const tOut = out.taobaoItems ?? [];
   const jOut = out.jdItems ?? [];
+  const dOut = out.douyinItems ?? [];
+  const vOut = out.vipItems ?? [];
+  const pOut = out.pddItems ?? [];
 
   const shortHint = pageShortfallHint(
     page,
@@ -463,7 +659,7 @@ app.post('/api/search', async (req, res) => {
   );
 
   return res.json(
-    jsonSearchOk(parsed, tOut, jOut, page, pageSize, {
+    jsonSearchOk(parsed, tOut, jOut, dOut, vOut, pOut, page, pageSize, {
       ...baseExtras,
       fetchedAt: out.ts,
       fetchWaveMax: out.fetchWaveMax ?? 0,
